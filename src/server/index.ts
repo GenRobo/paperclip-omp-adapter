@@ -12,10 +12,11 @@ import {
 } from "../metadata.js";
 import { detectModel, getConfigSchema, resolveOmpCommand } from "./config.js";
 import { execute } from "./execute.js";
-import { listOmpModels, refreshOmpModels } from "./models.js";
+import { listOmpModels, readOperatorModelCatalog, refreshOmpModels } from "./models.js";
 import { getOmpQuotaWindows } from "./quota.js";
 import { listOmpSkills, syncOmpSkills } from "./skills.js";
 import { testEnvironment } from "./test.js";
+import { requireRemoteOmpExecution } from "./policy.js";
 
 function nonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
@@ -69,7 +70,7 @@ function getRuntimeCommandSpec(config: Record<string, unknown>): AdapterRuntimeC
 }
 
 export function createServerAdapter(): ServerAdapterModule {
-  const advertisedModels = [...models];
+  const advertisedModels = requireRemoteOmpExecution() ? readOperatorModelCatalog() ?? [] : [...models];
   const listModels = async () => {
     const discovered = await listOmpModels();
     advertisedModels.length = 0;
@@ -83,10 +84,9 @@ export function createServerAdapter(): ServerAdapterModule {
     return discovered;
   };
 
-  // Paperclip's adapter summary currently counts only `models`, while its picker
-  // correctly calls `listModels`. Populate the shared summary asynchronously so
-  // startup stays non-blocking and both views converge on OMP's live catalog.
-  void listModels();
+  // Local discovery is optional. Remote-only hosts must supply an explicit catalog
+  // through listModels instead of launching OMP during adapter registration.
+  if (!requireRemoteOmpExecution()) void listModels();
 
   return {
     type,

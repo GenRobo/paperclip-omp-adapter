@@ -1,6 +1,7 @@
 import type { ProviderQuotaResult, QuotaWindow } from "@paperclipai/adapter-utils";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 import { detectionEnv, resolveOmpCommand } from "./config.js";
+import { requireRemoteOmpExecution } from "./policy.js";
 
 /** Paperclip drops a provider after 20s, so the probe has to settle well inside that. */
 const QUOTA_TIMEOUT_SEC = 12;
@@ -80,6 +81,14 @@ function reportWindows(report: Record<string, unknown>): QuotaWindow[] {
 
 /** Project `omp usage --json` onto Paperclip's provider quota contract. */
 export async function getOmpQuotaWindows(): Promise<ProviderQuotaResult> {
+  if (requireRemoteOmpExecution()) {
+    return {
+      provider: "omp",
+      ok: false,
+      error: "Local OMP quota discovery is disabled by PAPERCLIP_OMP_REQUIRE_REMOTE=true; inspect provider usage in the remote environment.",
+      windows: [],
+    };
+  }
   const command = resolveOmpCommand({});
   try {
     const result = await runChildProcess(

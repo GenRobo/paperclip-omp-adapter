@@ -31,6 +31,7 @@ import {
 } from "./config.js";
 import { parseOmpModelsOutput } from "./models.js";
 import { rewriteRemoteConfigPaths } from "./execute.js";
+import { remoteOmpTargetPolicyCheck } from "./policy.js";
 
 const AUTH_ERROR_RE = /(?:auth(?:entication|orization)?\s+(?:required|failed)|api[_ -]?key|invalid\s+(?:key|token)|not\s+logged\s+in|login\s+required|credentials?\s+(?:missing|not found)|unauthorized|\b401\b|\b403\b)/i;
 const CONFIG_ERROR_RE = /(?:models\.ya?ml|config\.ya?ml|validation failed|invalid (?:config|profile|yaml)|yaml.*(?:error|invalid)|unknown (?:setting|provider)|failed to load extension)/i;
@@ -166,6 +167,15 @@ export async function testEnvironment(
   const config = parseObject(ctx.config);
   const command = resolveOmpCommand(config);
   const target = ctx.executionTarget ?? null;
+  const policyFailure = remoteOmpTargetPolicyCheck(target);
+  if (policyFailure) {
+    return {
+      adapterType: ctx.adapterType,
+      status: "fail",
+      checks: [policyFailure],
+      testedAt: new Date().toISOString(),
+    };
+  }
   const remote = target?.kind === "remote";
   const configuredCwd = asString(config.cwd, "").trim();
   const cwd = remote

@@ -3,6 +3,7 @@ import path from "node:path";
 import type { AdapterModel } from "@paperclipai/adapter-utils";
 import { ensurePathInEnv, runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 import { resolveOmpProfile } from "./profile.js";
+import { requireRemoteOmpExecution } from "./policy.js";
 
 const MODEL_CACHE_TTL_MS = 60_000;
 const MODEL_DISCOVERY_TIMEOUT_SEC = 30;
@@ -185,8 +186,38 @@ function buildArgs(input: ResolvedDiscovery): string[] {
   for (const extension of input.extensions) args.push("--extension", extension);
   return args;
 }
+/** Explicit host catalog, independent of agent config and local OMP installation. */
+export function readOperatorModelCatalog(): AdapterModel[] | null {
+  const raw = process.env.PAPERCLIP_ADAPTER_MODELS?.trim();
+  if (!raw) return null;
+  try {
+    const catalog: unknown = JSON.parse(raw);
+    if (!catalog || typeof catalog !== "object" || Array.isArray(catalog)) throw new Error("Expected an object.");
+    const rows = (catalog as Record<string, unknown>).omp_local;
+    if (rows === undefined) return null;
+    if (!Array.isArray(rows)) throw new Error("Expected an array.");
+    return rows.map((value) => {
+      const row = objectValue(value);
+      if (typeof row.id !== "string" || !row.id) throw new Error("Expected a model id.");
+      return { id: row.id, label: typeof row.label === "string" ? row.label : row.id };
+    });
+  } catch {
+    throw Object.assign(
+      new Error('PAPERCLIP_ADAPTER_MODELS must be a JSON object mapping adapter types to arrays of {id,label?}; configure its omp_local entry with explicit provider/model selectors.'),
+      { code: "omp_model_catalog_invalid" },
+    );
+  }
+}
 
 export async function discoverOmpModels(input: DiscoveryInput = {}): Promise<AdapterModel[]> {
+  if (requireRemoteOmpExecution()) {
+    const models = readOperatorModelCatalog();
+    if (models) return models;
+    throw Object.assign(
+      new Error('Local OMP model discovery is disabled by PAPERCLIP_OMP_REQUIRE_REMOTE=true. Set an explicit provider/model in agent config.model; populate the model picker with host PAPERCLIP_ADAPTER_MODELS={"omp_local":[{"id":"provider/model"}]}.'),
+      { code: "omp_explicit_model_required" },
+    );
+  }
   const resolved = resolveDiscovery(input);
   const key = cacheKey(resolved);
   const now = Date.now();
@@ -225,6 +256,7 @@ export async function discoverOmpModels(input: DiscoveryInput = {}): Promise<Ada
 }
 
 export async function listOmpModels(): Promise<AdapterModel[]> {
+  if (requireRemoteOmpExecution()) return discoverOmpModels();
   try {
     return await discoverOmpModels();
   } catch {
@@ -233,6 +265,7 @@ export async function listOmpModels(): Promise<AdapterModel[]> {
 }
 
 export async function refreshOmpModels(): Promise<AdapterModel[]> {
+  if (requireRemoteOmpExecution()) return discoverOmpModels({ refresh: true });
   try {
     return await discoverOmpModels({ refresh: true });
   } catch {

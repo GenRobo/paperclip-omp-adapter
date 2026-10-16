@@ -12,8 +12,9 @@ import {
   runChildProcess,
 } from "@paperclipai/adapter-utils/server-utils";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { listOmpModels } from "./models.js";
+import { listOmpModels, readOperatorModelCatalog } from "./models.js";
 import { normalizeOmpProfile, resolveOmpProfile } from "./profile.js";
+import { requireRemoteOmpExecution } from "./policy.js";
 
 const CONFIG_PROBE_TIMEOUT_SEC = 15;
 const CONFIG_BLOCK_ALLOWLIST: Record<string, true> = {
@@ -185,6 +186,7 @@ export async function detectModel(): Promise<{
   source: string;
   candidates?: string[];
 } | null> {
+  if (requireRemoteOmpExecution()) return null;
   const command = resolveOmpCommand({});
   try {
     const env = detectionEnv();
@@ -266,7 +268,7 @@ function modelOptions(models: AdapterModel[]): ConfigFieldOption[] {
 
 export async function getConfigSchema(): Promise<AdapterConfigSchema> {
   const [models, detected, profiles] = await Promise.all([
-    listOmpModels(),
+    requireRemoteOmpExecution() ? readOperatorModelCatalog() ?? [] : listOmpModels(),
     detectModel(),
     profileOptions(),
   ]);
@@ -294,7 +296,9 @@ export async function getConfigSchema(): Promise<AdapterConfigSchema> {
         type: "combobox",
         options,
         ...(detected ? { default: detected.model } : {}),
-        hint: "Exact OMP selector (provider/model). Free text is accepted for custom or extension providers.",
+        hint: requireRemoteOmpExecution()
+          ? "Remote-only deployment: set an explicit provider/model selector. Local OMP discovery is disabled; the operator can populate this picker with PAPERCLIP_ADAPTER_MODELS.omp_local."
+          : "Exact OMP selector (provider/model). Free text is accepted for custom or extension providers.",
         group: "Models",
       },
       roleField("smolModel", "Small/fast model", "Optional selector passed to OMP --smol for cheap auxiliary work."),

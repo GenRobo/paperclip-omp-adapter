@@ -33,11 +33,14 @@ Core fields:
 - timeoutSec / graceSec / maxTime: Paperclip process deadline, termination grace, and OMP in-session deadline
 
 Model behavior:
-- Paperclip model listing calls omp models --json and refresh calls omp models refresh --json
+- Normally, Paperclip model listing calls omp models --json and refresh calls omp models refresh --json
 - OMP returns available models only; unavailable models remain enterable manually
 - Active ~/.omp/agent/models.yml, profile-specific config, runtime discovery, and extension providers are authoritative
+- With host PAPERCLIP_OMP_REQUIRE_REMOTE=true, model discovery never invokes OMP locally. Set model explicitly; the operator can populate the picker via PAPERCLIP_ADAPTER_MODELS.omp_local
 
 Operational behavior:
+- Host PAPERCLIP_OMP_REQUIRE_REMOTE=true rejects missing/local targets before command probes or execution; agent config and config.env cannot disable this policy
+- Remote-only deployments require a host-provided SSH target or sandbox provider runner; the adapter type remains omp_local
 - Each heartbeat runs omp --mode json -p under Paperclip process supervision
 - Local sessions use an adapter-owned --session-dir and exact --resume id; remote runs are deliberately ephemeral because Paperclip remote runtime directories are per run
 - Raw OMP JSONL is streamed unchanged; unknown events fall back to raw transcript output

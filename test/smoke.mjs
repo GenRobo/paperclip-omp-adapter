@@ -15,6 +15,7 @@ import { parseOmpJsonl } from "../dist/server/parse.js";
 import { createOmpProgressReporter } from "../dist/server/progress.js";
 import { getOmpQuotaWindows } from "../dist/server/quota.js";
 import { resolveOmpProfile } from "../dist/server/profile.js";
+import { discoverOmpModels } from "../dist/server/models.js";
 
 const adapter = createServerAdapter();
 assert.equal(adapter.type, "omp_local");
@@ -303,6 +304,136 @@ const run = (runId, runtime, expected, config = baseConfig) => adapter.execute({
   onLog: async () => {},
   onMeta: async (meta) => metas.push(meta),
 });
+
+// Operator policy is checked before any OMP probe, workspace creation, or spawn.
+const policyEnvKeys = ["PAPERCLIP_OMP_REQUIRE_REMOTE", "PAPERCLIP_ADAPTER_MODELS", "PAPERCLIP_OMP_COMMAND", "FAKE_OMP_ARGV_LOG"];
+const savedPolicyEnv = Object.fromEntries(policyEnvKeys.map((key) => [key, process.env[key]]));
+const policyArgvLog = path.join(root, "policy-argv.log");
+const deniedCwd = path.join(root, "must-not-be-created");
+let policySpawns = 0;
+const policyContext = {
+  runId: "00000000-0000-4000-8000-000000000020",
+  agent,
+  runtime: emptyRuntime,
+  config: {
+    ...baseConfig,
+    cwd: deniedCwd,
+    requireRemote: false,
+    executionTarget: { kind: "remote", transport: "sandbox", remoteCwd: "/runner/workspace" },
+    env: { PAPERCLIP_OMP_REQUIRE_REMOTE: "false", FAKE_OMP_ARGV_LOG: policyArgvLog },
+  },
+  context: {},
+  onLog: async () => {},
+  onSpawn: async () => { policySpawns += 1; },
+};
+try {
+  process.env.PAPERCLIP_OMP_REQUIRE_REMOTE = "true";
+  process.env.PAPERCLIP_OMP_COMMAND = fakeOmp;
+  process.env.FAKE_OMP_ARGV_LOG = policyArgvLog;
+  delete process.env.PAPERCLIP_ADAPTER_MODELS;
+  const remoteOnlyAdapter = createServerAdapter();
+  assert.equal(remoteOnlyAdapter.type, "omp_local");
+
+  for (const executionTarget of [
+    undefined,
+    null,
+    { kind: "local" },
+    { kind: "remote", transport: "ssh", remoteCwd: "/runner/workspace", spec: {} },
+    { kind: "remote", transport: "sandbox", remoteCwd: "/runner/workspace" },
+    { kind: "remote", transport: "sandbox", remoteCwd: "/runner/workspace", runner: {} },
+    { kind: "remote", transport: "other", remoteCwd: "/runner/workspace" },
+  ]) {
+    const denied = await remoteOnlyAdapter.execute({ ...policyContext, executionTarget });
+    assert.equal(denied.exitCode, 1);
+    assert.equal(denied.errorCode, "omp_remote_target_required");
+    assert.equal(denied.errorFamily, "configuration");
+    const environment = await remoteOnlyAdapter.testEnvironment({
+      companyId: agent.companyId,
+      adapterType: "omp_local",
+      config: policyContext.config,
+      executionTarget,
+    });
+    assert.equal(environment.status, "fail");
+    assert.deepEqual(environment.checks.map((check) => check.code), ["omp_remote_target_required"]);
+  }
+  assert.equal(policySpawns, 0);
+  await assert.rejects(fs.access(deniedCwd), { code: "ENOENT" });
+
+  await assert.rejects(remoteOnlyAdapter.listModels(), { code: "omp_explicit_model_required" });
+  await assert.rejects(remoteOnlyAdapter.refreshModels(), { code: "omp_explicit_model_required" });
+  await assert.rejects(
+    discoverOmpModels({ command: fakeOmp, env: { PAPERCLIP_OMP_REQUIRE_REMOTE: "false" } }),
+    { code: "omp_explicit_model_required" },
+  );
+  assert.equal(await remoteOnlyAdapter.detectModel(), null);
+  const explicitSchema = await remoteOnlyAdapter.getConfigSchema();
+  const explicitModel = explicitSchema.fields.find((field) => field.key === "model");
+  assert.equal(explicitModel.type, "combobox");
+  assert.deepEqual(explicitModel.options, []);
+  assert.equal(explicitModel.default, undefined);
+  const quota = await remoteOnlyAdapter.getQuotaWindows();
+  assert.equal(quota.ok, false);
+  assert.deepEqual(quota.windows, []);
+
+  process.env.PAPERCLIP_ADAPTER_MODELS = JSON.stringify({
+    omp_local: [{ id: "operator/model", label: "Operator model" }, { id: "operator/other" }],
+  });
+  const expectedCatalog = [
+    { id: "operator/model", label: "Operator model" },
+    { id: "operator/other", label: "operator/other" },
+  ];
+  assert.deepEqual(createServerAdapter().models, expectedCatalog);
+  assert.deepEqual(await remoteOnlyAdapter.listModels(), expectedCatalog);
+  assert.deepEqual(await remoteOnlyAdapter.refreshModels(), expectedCatalog);
+  assert.deepEqual(remoteOnlyAdapter.models, expectedCatalog);
+  const catalogSchema = await remoteOnlyAdapter.getConfigSchema();
+  assert.deepEqual(catalogSchema.fields.find((field) => field.key === "model").options.map((option) => option.value), expectedCatalog.map((model) => model.id));
+  process.env.PAPERCLIP_ADAPTER_MODELS = '{"omp_local":[]}';
+  assert.deepEqual(await remoteOnlyAdapter.listModels(), []);
+  for (const invalidCatalog of ["invalid-json", "[]", '{"omp_local":{}}', '{"omp_local":[{}]}']) {
+    process.env.PAPERCLIP_ADAPTER_MODELS = invalidCatalog;
+    await assert.rejects(remoteOnlyAdapter.listModels(), { code: "omp_model_catalog_invalid" });
+    await assert.rejects(remoteOnlyAdapter.getConfigSchema(), { code: "omp_model_catalog_invalid" });
+  }
+  delete process.env.PAPERCLIP_ADAPTER_MODELS;
+
+  // A real host runner is retained, including its failure: never retry locally.
+  const remoteFailure = new Error("test remote transport unavailable");
+  const remoteCommands = [];
+  const executionTarget = {
+    kind: "remote",
+    transport: "sandbox",
+    remoteCwd: "/runner/workspace",
+    runner: {
+      async execute(input) {
+        remoteCommands.push(input);
+        throw remoteFailure;
+      },
+    },
+  };
+  await assert.rejects(
+    remoteOnlyAdapter.execute({ ...policyContext, config: baseConfig, executionTarget }),
+    (error) => error === remoteFailure,
+  );
+  assert.ok(remoteCommands.length > 0);
+  const executionCommandCount = remoteCommands.length;
+  const remoteEnvironment = await remoteOnlyAdapter.testEnvironment({
+    companyId: agent.companyId,
+    adapterType: "omp_local",
+    config: baseConfig,
+    executionTarget,
+  });
+  assert.equal(remoteEnvironment.status, "fail");
+  assert.ok(remoteEnvironment.checks.some((check) => check.code === "omp_runtime_target_prepare_failed"));
+  assert.ok(remoteCommands.length > executionCommandCount);
+  assert.equal(policySpawns, 0);
+  await assert.rejects(fs.access(policyArgvLog), { code: "ENOENT" });
+} finally {
+  for (const key of policyEnvKeys) {
+    if (savedPolicyEnv[key] === undefined) delete process.env[key];
+    else process.env[key] = savedPolicyEnv[key];
+  }
+}
 
 const fresh = await run("00000000-0000-4000-8000-000000000011", emptyRuntime, "FRESH_OK");
 assert.equal(fresh.exitCode, 0, fresh.errorMessage ?? "fresh execution failed");

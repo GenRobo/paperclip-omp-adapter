@@ -68,7 +68,7 @@ jobs:
       - name: Resolve npm publication state
         id: npm-state
         env:
-          PACKAGE_NAME: "@zhafron/paperclip-omp-adapter"
+          PACKAGE_NAME: "@genrobo/paperclip-omp-adapter"
           VERSION: ${{ github.ref_name }}
         run: |
           VERSION_NUM="${VERSION#v}"

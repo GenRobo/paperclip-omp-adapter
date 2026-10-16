@@ -1,8 +1,8 @@
 # Paperclip OMP Adapter
 
-[![CI](https://github.com/tickernelz/paperclip-omp-adapter/actions/workflows/ci.yml/badge.svg)](https://github.com/tickernelz/paperclip-omp-adapter/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/%40zhafron%2Fpaperclip-omp-adapter.svg)](https://www.npmjs.com/package/@zhafron/paperclip-omp-adapter)
-[![license](https://img.shields.io/npm/l/%40zhafron%2Fpaperclip-omp-adapter.svg)](LICENSE)
+[![CI](https://github.com/GenRobo/paperclip-omp-adapter/actions/workflows/ci.yml/badge.svg)](https://github.com/GenRobo/paperclip-omp-adapter/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/%40genrobo%2Fpaperclip-omp-adapter.svg)](https://www.npmjs.com/package/@genrobo/paperclip-omp-adapter)
+[![license](https://img.shields.io/npm/l/%40genrobo%2Fpaperclip-omp-adapter.svg)](LICENSE)
 
 External Paperclip adapter for running Oh My Pi (OMP) CLI in headless mode with native model discovery, custom providers, resumable local sessions, skills synchronization, multi-workspace support, and structured transcripts.
 
@@ -27,8 +27,8 @@ This adapter integrates OMP into Paperclip as an external adapter module (`omp_l
 ## Requirements
 
 - Node.js >= 24.11.0
-- Paperclip >= 2026.916.0
-- Oh My Pi (OMP) installed in the environment (`omp` executable available in `PATH` or explicitly configured via `command`)
+- Paperclip 2026.1012.0 (adapter helper and shared contracts pinned to this release)
+- Oh My Pi (OMP) installed in the selected execution environment (`omp` executable available in `PATH` or explicitly configured via `command`); remote-only deployments do not need OMP on the Paperclip hub
 
 Install OMP globally:
 
@@ -40,10 +40,10 @@ npm install -g @oh-my-pi/pi-coding-agent@latest
 
 ### Via Paperclip CLI
 
-In a running Paperclip instance, install the adapter using the official package:
+After publishing this fork's package, install it in a running Paperclip instance with:
 
 ```bash
-paperclipai adapter install --payload-json '{"packageName":"@zhafron/paperclip-omp-adapter","version":"0.2.3"}' --json
+paperclipai adapter install --payload-json '{"packageName":"@genrobo/paperclip-omp-adapter","version":"0.8.0"}' --json
 ```
 
 To upgrade an existing installation:
@@ -65,6 +65,26 @@ Verify model discovery for a company:
 ```bash
 paperclipai adapter models omp_local --company-id <company-id> --json
 ```
+
+### Remote-only deployment policy
+
+Set these variables on the **Paperclip server process/container**, not in an agent's adapter configuration:
+
+```bash
+PAPERCLIP_OMP_REQUIRE_REMOTE=true
+PAPERCLIP_ADAPTER_MODELS='{"omp_local":[{"id":"provider/model","label":"Display name"}]}'
+```
+
+The policy is enabled by `true` (case-insensitive, surrounding whitespace ignored). When unset or another value, normal local-library behavior is preserved. Adapter type remains `omp_local`; this is an operator deployment policy, not a new adapter or agent-editable setting.
+
+- `execute` and `testEnvironment` require a host-supplied `executionTarget` with `kind: "remote"`, a nonempty `remoteCwd`, and either `transport: "ssh"` with a valid Paperclip SSH `spec`, or `transport: "sandbox"` with a live host `runner.execute` function. Execution also retains the existing host legacy SSH `executionTransport.remoteExecution` contract.
+- Missing/local/malformed targets fail before workspace creation, command resolution, installation, probes, or local OMP spawn. `execute` returns `exitCode: 1`, `errorFamily: "configuration"`, `errorCode: "omp_remote_target_required"`; environment testing returns `status: "fail"` with the same check code.
+- Agent `config`, `config.env`, and serialized target-like configuration cannot disable the host policy or supply the host runner. Remote connectivity/setup failures propagate; there is no local fallback. Operators remain responsible for placing the supplied SSH/sandbox target on the separate runner, not on the hub.
+- Model listing/refresh and adapter registration never invoke local OMP under this policy. They reuse Paperclip's existing `PAPERCLIP_ADAPTER_MODELS` JSON object, specifically its `omp_local` array of `{id,label?}` entries. Missing labels default to the id; an empty array is an explicit empty catalog. This is a picker catalog, not provider credentials or proof of model availability.
+- Without an `omp_local` catalog, listing/refresh reject with error `code: "omp_explicit_model_required"` and instructions to set agent `config.model` to a provider/model selector. The configuration schema remains usable as a free-text model combobox; automatic model detection returns `null`. Invalid catalog JSON/OMP entries reject with `code: "omp_model_catalog_invalid"`.
+- Host quota discovery returns `ok: false` and no windows without invoking `omp usage`. Environment tests with a valid remote target still perform their OMP model/auth probes remotely.
+
+Configure the Paperclip host to permit this external adapter on the selected remote environment and supply a real provider runner/SSH connection. This package does not provision an environment or make an otherwise ineligible host dispatch remote.
 
 ## Configuration Reference
 
@@ -106,9 +126,9 @@ The adapter exposes the following configuration schema fields under an agent's a
 ### Building and Testing
 
 ```bash
-git clone https://github.com/tickernelz/paperclip-omp-adapter.git
+git clone https://github.com/GenRobo/paperclip-omp-adapter.git
 cd paperclip-omp-adapter
-npm install
+npm ci
 npm run typecheck
 npm test
 ```
@@ -119,8 +139,29 @@ Pack the local repository and install the tarball directly into your Paperclip i
 
 ```bash
 TARBALL=$(npm pack)
-paperclipai adapter install --payload-json "{\"packageName\":\"$PWD/$TARBALL\",\"version\":\"0.2.3\"}" --json
+paperclipai adapter install --payload-json "{\"packageName\":\"$PWD/$TARBALL\",\"version\":\"0.8.0\"}" --json
 ```
+
+### Maintaining this fork
+
+Use Node 24 (at least 24.11.0; deployment toolchain 24.21.0). Keep `@paperclipai/adapter-utils` and `@paperclipai/shared` pinned together to the deployed Paperclip contract. After changing package identity/version/dependencies, regenerate and commit the lockfile with the supported toolchain before `npm ci` or publication:
+
+```bash
+npm install --package-lock-only --ignore-scripts
+npm ci --ignore-scripts
+npm run typecheck
+npm test
+npm run pack:check
+```
+
+The smoke suite exercises the public server adapter's denied local/missing/malformed targets, immutable host policy, explicit model catalog, and remote runner failure propagation without local fallback. Existing policy-off execution tests cover the normal library behavior. Remote deployment acceptance additionally needs a real SSH/sandbox integration run; the smoke runner failure fixture does not claim a successful remote execution.
+
+### Changes in 0.8.0
+
+- Adopted `@genrobo/paperclip-omp-adapter` and the GenRobo fork metadata; retained the original MIT license and attribution.
+- Pinned Paperclip helper/shared contracts to 2026.1012.0.
+- Added operator-owned remote-only execution/environment enforcement and non-spawning model/config/quota discovery on the hub.
+- Reused the host's explicit model catalog contract; retained `omp_local` and existing policy-off behavior.
 
 ## License
 

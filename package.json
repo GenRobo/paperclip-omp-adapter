@@ -1,6 +1,6 @@
 {
-  "name": "@zhafron/paperclip-omp-adapter",
-  "version": "0.7.0",
+  "name": "@genrobo/paperclip-omp-adapter",
+  "version": "0.8.0",
   "description": "External Paperclip adapter for the Oh My Pi coding-agent CLI",
   "type": "module",
   "license": "MIT",
@@ -15,11 +15,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tickernelz/paperclip-omp-adapter.git"
+    "url": "git+https://github.com/GenRobo/paperclip-omp-adapter.git"
   },
-  "homepage": "https://github.com/tickernelz/paperclip-omp-adapter#readme",
+  "homepage": "https://github.com/GenRobo/paperclip-omp-adapter#readme",
   "bugs": {
-    "url": "https://github.com/tickernelz/paperclip-omp-adapter/issues"
+    "url": "https://github.com/GenRobo/paperclip-omp-adapter/issues"
   },
   "publishConfig": {
     "access": "public"
@@ -51,7 +51,8 @@
     "pack:check": "npm pack --dry-run"
   },
   "dependencies": {
-    "@paperclipai/adapter-utils": "^2026.916.0",
+    "@paperclipai/adapter-utils": "2026.1012.0",
+    "@paperclipai/shared": "2026.1012.0",
     "yaml": "^2.9.0"
   },
   "devDependencies": {

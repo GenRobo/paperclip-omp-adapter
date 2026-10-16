@@ -58,6 +58,7 @@ import {
 import { classifyOmpFailure } from "./failure.js";
 import { createOmpProgressReporter } from "./progress.js";
 import { ensureOmpSkills } from "./skills.js";
+import { remoteOmpTargetPolicyCheck } from "./policy.js";
 
 const CAPABILITY_MANIFEST = {
   bindings: [
@@ -447,6 +448,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     executionTarget: ctx.executionTarget,
     legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
   });
+  const policyFailure = remoteOmpTargetPolicyCheck(executionTarget);
+  if (policyFailure) {
+    return {
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorCode: policyFailure.code,
+      errorFamily: "configuration",
+      errorMessage: `${policyFailure.message} ${policyFailure.hint}`,
+    };
+  }
   const remote = adapterExecutionTargetIsRemote(executionTarget);
   const workspace = parseObject(context.paperclipWorkspace);
   const workspaceCwd = asString(workspace.cwd, "").trim();
