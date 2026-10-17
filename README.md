@@ -33,7 +33,7 @@ This adapter integrates OMP into Paperclip as an external adapter module (`omp_l
 Install OMP globally:
 
 ```bash
-npm install -g @oh-my-pi/pi-coding-agent@latest
+npm install -g @oh-my-pi/pi-coding-agent@18.11.0
 ```
 
 ## Installation
@@ -43,7 +43,7 @@ npm install -g @oh-my-pi/pi-coding-agent@latest
 After publishing this fork's package, install it in a running Paperclip instance with:
 
 ```bash
-paperclipai adapter install --payload-json '{"packageName":"@genrobo/paperclip-omp-adapter","version":"0.8.0"}' --json
+paperclipai adapter install --payload-json '{"packageName":"@genrobo/paperclip-omp-adapter","version":"0.9.0"}' --json
 ```
 
 To upgrade an existing installation:
@@ -85,6 +85,95 @@ The policy is enabled by `true` (case-insensitive, surrounding whitespace ignore
 - Host quota discovery returns `ok: false` and no windows without invoking `omp usage`. Environment tests with a valid remote target still perform their OMP model/auth probes remotely.
 
 Configure the Paperclip host to permit this external adapter on the selected remote environment and supply a real provider runner/SSH connection. This package does not provision an environment or make an otherwise ineligible host dispatch remote.
+
+### Native MCP and persistent workload tools (OMP 18.11.0)
+
+Native `runtimeTools` and `runtimeMcp` are materialized into a private per-run
+`mcp.json` using OMP's `mcpServers` convention. Native connection identities,
+not display names, identify servers; unsafe MCP key characters are mapped to
+stable hashed names without losing the host-side connection identity.
+
+Remote HTTP MCP connections use the authenticated execution-target bridge.
+The host retains each exact upstream endpoint and bearer token; the runner
+receives only its granted `/api/runtime-mcp/<bridge-id>` routes and per-run
+bridge credential. Generated JSON uses environment references for URLs and
+authorization. Unknown grants, query overrides and endpoint aliases fail
+closed; forwarding rejects redirects.
+
+This remote feature requires the infrastructure repository's
+[`runtime-mcp-bridge.patch`](https://github.com/GenRobo/GR_Agentic_Sim_Team_Infra/blob/main/containers/paperclip/runtime-mcp-bridge.patch)
+and `PAPERCLIP_RUNTIME_MCP_BRIDGE_VERSION=1` exported by the host's
+`@paperclipai/adapter-utils`. The adapter must resolve that patched SDK, not a
+second unpatched nested copy. A stock helper package fails explicitly rather
+than sending host-local URLs or native connection tokens into the runner.
+Local execution continues to use its native environment-bound credentials.
+
+For issue-scoped workload tools, set this **only on the trusted Paperclip server
+process**, never in an agent's adapter `config.env`:
+
+```bash
+PAPERCLIP_WORKLOAD_MCP_COMMAND=/opt/gr-workload-mcp-client/bin/gr-workload-mcp-client
+# Optional: explicit operator-owned native MCP configuration on the Paperclip host
+PAPERCLIP_OMP_MCP_CONFIG=/etc/paperclip/omp/mcp.json
+```
+
+The command is an absolute executable path **inside the execution target**.
+Install `services/workload-mcp-client` from the infrastructure repository at
+`/opt/gr-workload-mcp-client`, with a trusted Node >=24.11.0 on `PATH` (the
+entrypoint uses `#!/usr/bin/env node`). The package pins MCP SDK 1.29.0 and
+provides `bin/gr-workload-mcp-client`; image preparation uses:
+
+```bash
+npm ci --ignore-scripts
+npm run build
+npm prune --omit=dev --ignore-scripts
+chmod 0555 bin/gr-workload-mcp-client
+```
+
+Make the installation and Node binary operator-owned and read-only to the
+sandbox user. No runtime package download, agent-supplied command, broker
+secret, or new worker listener is used. The client inherits native
+`PAPERCLIP_API_URL`, `PAPERCLIP_API_KEY`, `PAPERCLIP_RUN_ID`, and
+`PAPERCLIP_TASK_ID`; remote issue runs require a working native Paperclip bridge.
+The native server must permit only the `gr.workloads` issue routes through both
+bridge transports and have the workloads plugin installed. Missing authority
+fails explicitly. The API URL is an HTTP(S) origin, not an `/api` URL.
+
+An optional operator MCP file is merged without modifying its source, preserving
+servers and enable/disable lists. Reserved server-name collisions, aliases of
+native endpoints/executables, malformed files, and unselected inherited
+`mcp.json`/`.mcp.json` fail closed. Select intentional existing agent-directory
+MCP configuration explicitly with `PAPERCLIP_OMP_MCP_CONFIG`; it is never
+implicitly promoted from an agent-selected directory. Operator MCP entries and
+their referenced executables must themselves be safe for the execution target.
+Agent-supplied authority variables, `config.env.PI_CONFIG_FILES`, and raw
+profile/config override arguments are rejected while native MCP is active;
+use the normal `configFiles` field for ordinary overlays. Settings that disable
+the native discovery provider or a required runtime MCP server fail clearly
+rather than quietly removing tools.
+
+A final trusted `--config` overlay disables **only MCP project discovery**
+before OMP deduplication, so project `mcp.json` cannot shadow runtime tools.
+It waits for MCP startup discovery to settle (individual server deadlines remain
+bounded). It does not disable discovery providers, skills, rules, or unrelated
+OMP features. Configured ordinary overlays still apply before this policy.
+Temporary configuration is removed by the existing per-run cleanup.
+
+The seven tools are `gr_request_resource`, `gr_list_resources`,
+`gr_resource_status`, `gr_application_tools`, `gr_call_application`,
+`gr_operation_status`, and `gr_release_resource`. Mutations require a
+caller-retained request/operation UUID: transport reconnection must reuse that
+ID with the same payload. HTTP calls have a 20-second deadline and no automatic
+retry; uncertain mutations are not represented as failures safe to repeat.
+Completed operation results preserve actual MCP image/resource blocks and
+structured output, including failed application results with partial-mutation
+warnings and `isError: true`. Do not re-execute indeterminate edits; save desired
+state before explicit release.
+
+Development checks include `npm test` here and, in the client package,
+`npm run typecheck && npm test`. Deployment qualification must additionally
+exercise real OMP tool discovery, native bridge authentication, and completed
+image delivery to the model; source/config preparation tests are not that proof.
 
 ## Configuration Reference
 
@@ -139,7 +228,7 @@ Pack the local repository and install the tarball directly into your Paperclip i
 
 ```bash
 TARBALL=$(npm pack)
-paperclipai adapter install --payload-json "{\"packageName\":\"$PWD/$TARBALL\",\"version\":\"0.8.0\"}" --json
+paperclipai adapter install --payload-json "{\"packageName\":\"$PWD/$TARBALL\",\"version\":\"0.9.0\"}" --json
 ```
 
 ### Maintaining this fork
@@ -155,6 +244,13 @@ npm run pack:check
 ```
 
 The smoke suite exercises the public server adapter's denied local/missing/malformed targets, immutable host policy, explicit model catalog, and remote runner failure propagation without local fallback. Existing policy-off execution tests cover the normal library behavior. Remote deployment acceptance additionally needs a real SSH/sandbox integration run; the smoke runner failure fixture does not claim a successful remote execution.
+
+### Changes in 0.9.0
+
+- Materialized native runtime/project MCP and issue-scoped workload tools in isolated OMP configuration.
+- Preserved native identity, deduplicated matching dual delivery, and rejected conflicting authority, inherited untrusted MCP configuration and project overrides.
+- Routed remote native MCP through exact host-owned grants with rebased bridge credentials; required the qualified patched host SDK.
+- Exercised a real Paperclip artist on the remote OMP runner, including live Slurm Blender edits, image delivery, saved artifacts and native task review.
 
 ### Changes in 0.8.0
 

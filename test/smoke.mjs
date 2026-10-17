@@ -7,7 +7,6 @@ import { createServerAdapter } from "../dist/index.js";
 import { prepareOmpRuntimeConfig } from "../dist/server/config.js";
 import {
   applyPreparedOmpAgentEnvironment,
-  applyRuntimeToolAccess,
   rewriteRemoteConfigPaths,
 } from "../dist/server/execute.js";
 import { classifyOmpFailure } from "../dist/server/failure.js";
@@ -778,29 +777,6 @@ assert.deepEqual(
   classifyOmpFailure({ parsedError: "", stderr: "", timedOut: false, exitCode: 3, signal: null }),
   { errorCode: "omp_exit_3", errorFamily: null, retryNotBefore: null },
 );
-
-// Regression test 12: Paperclip runtime tools reach OMP through the process environment
-const runtimeEnv = {};
-const guidance = applyRuntimeToolAccess(
-  runtimeEnv,
-  {
-    version: 1,
-    guidance: "Use Paperclip connections before asking a human.",
-    mcpEndpoint: "https://paperclip.test/mcp",
-    rest: { connectionsSearch: "https://paperclip.test/search", connectionRequest: "https://paperclip.test/request" },
-    bearerToken: "rt-token",
-    expiresAt: "2026-09-19T12:00:00.000Z",
-    tools: ["connections_search", "connection_request"],
-  },
-  { getServers: () => [{ name: "github", url: "https://paperclip.test/mcp/github", token: "mcp-token", connectionId: "conn-1" }] },
-);
-assert.equal(runtimeEnv.PAPERCLIP_RUNTIME_TOOLS_TOKEN, "rt-token");
-assert.equal(runtimeEnv.PAPERCLIP_CONNECTIONS_SEARCH_URL, "https://paperclip.test/search");
-assert.match(runtimeEnv.PAPERCLIP_RUNTIME_MCP_SERVERS, /github/);
-assert.equal(JSON.parse(runtimeEnv.PAPERCLIP_RUNTIME_MCP_TOKENS).github, "mcp-token");
-assert.match(guidance, /Use Paperclip connections before asking a human\./);
-assert.match(guidance, /1 MCP server\(s\)/);
-assert.equal(applyRuntimeToolAccess({}, undefined, undefined), "");
 
 // Regression test 13: a run that never reached the provider reports bootstrap evidence
 const bootstrap = await run(

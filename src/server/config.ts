@@ -15,6 +15,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { listOmpModels, readOperatorModelCatalog } from "./models.js";
 import { normalizeOmpProfile, resolveOmpProfile } from "./profile.js";
 import { requireRemoteOmpExecution } from "./policy.js";
+import { materializeRuntimeMcp, type RuntimeMcpPlan } from "./mcp.js";
 
 const CONFIG_PROBE_TIMEOUT_SEC = 15;
 const CONFIG_BLOCK_ALLOWLIST: Record<string, true> = {
@@ -677,12 +678,12 @@ async function copySanitizedYaml(
 
 export async function prepareOmpRuntimeConfig(
   config: unknown,
-  options: { forceMaterialized?: boolean } = {},
+  options: { forceMaterialized?: boolean; runtimeMcp?: RuntimeMcpPlan | null } = {},
 ): Promise<PreparedOmpRuntimeConfig> {
   const record = objectValue(config);
   const selection = runtimeSelection(record);
   const hasInlineModels = typeof record.modelsYaml === "string" && record.modelsYaml.trim().length > 0;
-  const mustMaterialize = hasInlineModels || options.forceMaterialized === true;
+  const mustMaterialize = hasInlineModels || options.forceMaterialized === true || Boolean(options.runtimeMcp);
   if (!mustMaterialize) {
     return {
       agentDir: selection.agentDir,
@@ -724,6 +725,10 @@ export async function prepareOmpRuntimeConfig(
       notes.push("Using a sanitized inline models.yml; credentials must remain in environment bindings.");
     } else {
       notes.push("Using a materialized OMP agent directory; agent.db and secret-bearing configuration were not copied.");
+    }
+    if (options.runtimeMcp) {
+      await materializeRuntimeMcp(tempDir, selection.sourceAgentDir, options.runtimeMcp);
+      notes.push("Materialized native MCP servers with an isolated project-discovery policy; operator MCP configuration was not overwritten.");
     }
     return {
       agentDir: tempDir,

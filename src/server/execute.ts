@@ -25,6 +25,7 @@ import {
   runAdapterExecutionTargetProcess,
   startAdapterExecutionTargetPaperclipBridge,
 } from "@paperclipai/adapter-utils/execution-target";
+import * as executionTargetApi from "@paperclipai/adapter-utils/execution-target";
 import {
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   asBoolean,
@@ -59,6 +60,7 @@ import { classifyOmpFailure } from "./failure.js";
 import { createOmpProgressReporter } from "./progress.js";
 import { ensureOmpSkills } from "./skills.js";
 import { remoteOmpTargetPolicyCheck } from "./policy.js";
+import { assertRuntimeMcpConfig, bridgedRuntimeMcpEnv, createRuntimeMcpPlan, MCP_OVERLAY_FILENAME, rejectRuntimeMcpSettingsConflicts } from "./mcp.js";
 
 const CAPABILITY_MANIFEST = {
   bindings: [
@@ -204,6 +206,7 @@ function buildOmpArgs(input: {
   resumeSessionId: string | null;
   omitProfile: boolean;
   effectiveProfile: string | null;
+  mcpConfigPath?: string;
 }): string[] {
   const { config } = input;
   const args = ["--mode", "json", "-p"];
@@ -301,6 +304,7 @@ function buildOmpArgs(input: {
     }
   }
   args.push(...stringList(config.extraArgs));
+  if (input.mcpConfigPath) args.push("--config", input.mcpConfigPath);
   args.push(input.userPrompt);
   return args;
 }
@@ -388,48 +392,6 @@ async function buildPrompts(input: {
   };
 }
 
-export function applyRuntimeToolAccess(
-  env: Record<string, string>,
-  tools: AdapterExecutionContext["runtimeTools"],
-  mcp: AdapterExecutionContext["runtimeMcp"],
-): string {
-  const sections: string[] = [];
-  if (tools) {
-    env.PAPERCLIP_RUNTIME_TOOLS_TOKEN = tools.bearerToken;
-    env.PAPERCLIP_RUNTIME_TOOLS_MCP_ENDPOINT = tools.mcpEndpoint;
-    env.PAPERCLIP_RUNTIME_TOOLS_EXPIRES_AT = tools.expiresAt;
-    env.PAPERCLIP_CONNECTIONS_SEARCH_URL = tools.rest.connectionsSearch;
-    env.PAPERCLIP_CONNECTION_REQUEST_URL = tools.rest.connectionRequest;
-    sections.push(tools.guidance);
-    sections.push(
-      [
-        "Paperclip runtime tools are delivered through the environment of this run.",
-        `Bearer token: $PAPERCLIP_RUNTIME_TOOLS_TOKEN (valid until ${tools.expiresAt}).`,
-        `Search connections: POST $PAPERCLIP_CONNECTIONS_SEARCH_URL`,
-        `Request a connection: POST $PAPERCLIP_CONNECTION_REQUEST_URL`,
-        `MCP endpoint: $PAPERCLIP_RUNTIME_TOOLS_MCP_ENDPOINT`,
-        "Send the bearer token as the Authorization header. Never print the token.",
-      ].join("\n"),
-    );
-  }
-  const servers = mcp?.getServers() ?? [];
-  if (servers.length > 0) {
-    env.PAPERCLIP_RUNTIME_MCP_SERVERS = JSON.stringify(
-      servers.map((server) => ({ name: server.name, url: server.url, connectionId: server.connectionId })),
-    );
-    env.PAPERCLIP_RUNTIME_MCP_TOKENS = JSON.stringify(
-      Object.fromEntries(servers.map((server) => [server.name, server.token])),
-    );
-    sections.push(
-      [
-        `Paperclip provisioned ${servers.length} MCP server(s) for this run: ${servers.map((s) => s.name).join(", ")}.`,
-        "Endpoints are in $PAPERCLIP_RUNTIME_MCP_SERVERS and their bearer tokens in $PAPERCLIP_RUNTIME_MCP_TOKENS, keyed by server name.",
-        "OMP loads MCP servers from its agent directory, so reach these over HTTP for this run instead of expecting them in the tool list.",
-      ].join("\n"),
-    );
-  }
-  return sections.join("\n\n");
-}
 
 export function applyPreparedOmpAgentEnvironment(
   env: Record<string, string>,
@@ -466,7 +428,28 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const cwd = workspaceCwd || configuredCwd || process.cwd();
   await ensureAbsoluteDirectory(cwd, { createIfMissing: true });
 
-  const preparedConfig = await prepareOmpRuntimeConfig(config, { forceMaterialized: remote });
+  const issueId = asString(context.taskId, "").trim() || asString(context.issueId, "").trim();
+  const runtimeMcp = createRuntimeMcpPlan(ctx.runtimeTools, ctx.runtimeMcp, issueId);
+  if (runtimeMcp) {
+    assertRuntimeMcpConfig(config);
+    if (remote && runtimeMcp.httpServers.length &&
+        (!adapterExecutionTargetUsesPaperclipBridge(executionTarget) ||
+         !("PAPERCLIP_RUNTIME_MCP_BRIDGE_VERSION" in executionTargetApi) ||
+         executionTargetApi.PAPERCLIP_RUNTIME_MCP_BRIDGE_VERSION !== 1)) {
+      throw new Error("Remote native MCP requires the host SDK's runtime MCP bridge version 1; no direct hub credentials or unreachable host endpoints are sent to the runner.");
+    }
+    const overlayFiles = [
+      ...stringList(config.configFiles),
+      ...(!remote ? (process.env.PI_CONFIG_FILES ?? "").split(path.delimiter).filter(Boolean) : []),
+    ].map(filename => path.resolve(cwd, filename.startsWith("~/") || filename.startsWith("~\\") ? path.join(os.homedir(), filename.slice(2)) : filename));
+    await rejectRuntimeMcpSettingsConflicts([
+      path.join(cwd, ".omp", "config.yml"),
+      path.join(cwd, ".omp", "settings.json"),
+      path.join(cwd, ".claude", "settings.json"),
+      ...overlayFiles,
+    ], runtimeMcp);
+  }
+  const preparedConfig = await prepareOmpRuntimeConfig(config, { forceMaterialized: remote, runtimeMcp });
   let restoreWorkspace: (() => Promise<void>) | null = null;
   let paperclipBridge: AdapterExecutionTargetPaperclipBridgeHandle | null = null;
   try {
@@ -502,8 +485,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       if (key.startsWith("PAPERCLIP_") && Object.hasOwn(env, key)) continue;
       env[key] = value;
     }
-    if (!env.PAPERCLIP_API_KEY && authToken) env.PAPERCLIP_API_KEY = authToken;
-    const runtimeToolGuidance = applyRuntimeToolAccess(env, ctx.runtimeTools, ctx.runtimeMcp);
+    if (authToken && (runtimeMcp || !env.PAPERCLIP_API_KEY)) env.PAPERCLIP_API_KEY = authToken;
+    if (runtimeMcp && !remote) Object.assign(env, runtimeMcp.env);
+    const runtimeToolGuidance = runtimeMcp?.guidance ?? "";
     applyPreparedOmpAgentEnvironment(env, preparedConfig);
 
     const inheritedLocalEnv = stringsOnly(sanitizeInheritedPaperclipEnv(process.env));
@@ -514,6 +498,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
     const localRuntimeEnv = stringsOnly(ensurePathInEnv({ ...inheritedLocalEnv, ...env }));
     const targetEnv = remote ? stringsOnly(ensurePathInEnv(env)) : localRuntimeEnv;
+    // Version probes/install checks do not need the real host-side run authority.
+    if (remote && adapterExecutionTargetUsesPaperclipBridge(executionTarget)) delete targetEnv.PAPERCLIP_API_KEY;
     const command = resolveOmpCommand(config);
     const timeoutSec = resolveAdapterExecutionTargetTimeoutSec(
       executionTarget,
@@ -585,7 +571,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
     const runtimeTarget = overrideAdapterExecutionTargetRemoteCwd(executionTarget, effectiveExecutionCwd);
     if (remote && adapterExecutionTargetUsesPaperclipBridge(runtimeTarget)) {
-      paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
+      const bridgeInput = {
         runId,
         target: runtimeTarget,
         runtimeRootDir,
@@ -593,14 +579,33 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         timeoutSec,
         hostApiToken: env.PAPERCLIP_API_KEY,
         hostApiUrl: env.PAPERCLIP_API_URL,
+        runtimeMcpServers: runtimeMcp?.httpServers,
         onLog,
-      });
-      if (paperclipBridge) Object.assign(env, paperclipBridge.env);
+      };
+      paperclipBridge = await startAdapterExecutionTargetPaperclipBridge(bridgeInput);
+      if (paperclipBridge) {
+        Object.assign(env, paperclipBridge.env);
+        if (runtimeMcp) Object.assign(env, bridgedRuntimeMcpEnv(runtimeMcp, paperclipBridge.env));
+      }
+    }
+    if (runtimeMcp?.workloadCommand) {
+      if (!env.PAPERCLIP_API_URL || !env.PAPERCLIP_API_KEY || env.PAPERCLIP_TASK_ID !== issueId || env.PAPERCLIP_RUN_ID !== runId || (remote && !paperclipBridge)) {
+        throw new Error("Workload MCP requires native issue/run authority and, for remote runs, a working Paperclip API bridge.");
+      }
     }
 
     const omitProfile = preparedConfig.materialized || (preparedConfig.profileSpecified && preparedConfig.profile === null);
     const invocationEnv = remote ? stringsOnly(ensurePathInEnv(env)) : localRuntimeEnv;
     if (remote) applyPreparedOmpAgentEnvironment(invocationEnv, preparedConfig, env.PI_CODING_AGENT_DIR ?? null);
+    if (runtimeMcp?.workloadCommand) {
+      await ensureAdapterExecutionTargetCommandResolvable(
+        runtimeMcp.workloadCommand,
+        runtimeTarget,
+        cwd,
+        invocationEnv,
+        { timeoutSec: Math.min(timeoutSec || 15, 15) },
+      );
+    }
     const resolvedCommand = await resolveAdapterExecutionTargetCommandForLogs(
       command,
       runtimeTarget,
@@ -685,6 +690,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         resumeSessionId,
         omitProfile,
         effectiveProfile: preparedConfig.profile,
+        mcpConfigPath: runtimeMcp && env.PI_CODING_AGENT_DIR
+          ? (remote ? path.posix : path).join(env.PI_CODING_AGENT_DIR, MCP_OVERLAY_FILENAME)
+          : undefined,
       });
       if (onMeta) {
         await onMeta({
