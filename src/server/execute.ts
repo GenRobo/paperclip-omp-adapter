@@ -61,6 +61,7 @@ import { createOmpProgressReporter } from "./progress.js";
 import { ensureOmpSkills } from "./skills.js";
 import { remoteOmpTargetPolicyCheck } from "./policy.js";
 import { assertRuntimeMcpConfig, bridgedRuntimeMcpEnv, createRuntimeMcpPlan, MCP_OVERLAY_FILENAME, rejectRuntimeMcpSettingsConflicts } from "./mcp.js";
+import { applyGitHubPatEnvironment, createGitHubPatPlan, materializeGitHubPatLaunchers } from "./github-pat.js";
 
 const CAPABILITY_MANIFEST = {
   bindings: [
@@ -456,6 +457,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     await ensureOmpSkills(config, preparedConfig.agentDir ?? undefined);
 
     const configuredEnv = parseObject(config.env);
+    const githubPat = await createGitHubPatPlan({
+      companyId: agent.companyId, agentId: agent.id, issueId,
+      repoUrl: asString(workspace.repoUrl, ""), remote, env: configuredEnv,
+    });
+    if (githubPat) {
+      if (!preparedConfig.agentDir) throw new Error("GitHub PAT execution requires an isolated runtime asset directory.");
+      await materializeGitHubPatLaunchers(preparedConfig.agentDir);
+    }
     const env: Record<string, string> = buildPaperclipEnv(agent);
     addWakeEnvironment(env, runId, context);
     const workspaceHints = Array.isArray(context.paperclipWorkspaces)
@@ -500,6 +509,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const targetEnv = remote ? stringsOnly(ensurePathInEnv(env)) : localRuntimeEnv;
     // Version probes/install checks do not need the real host-side run authority.
     if (remote && adapterExecutionTargetUsesPaperclipBridge(executionTarget)) delete targetEnv.PAPERCLIP_API_KEY;
+    delete targetEnv.GR_GITHUB_TOKEN;
     const command = resolveOmpCommand(config);
     const timeoutSec = resolveAdapterExecutionTargetTimeoutSec(
       executionTarget,
@@ -597,12 +607,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const omitProfile = preparedConfig.materialized || (preparedConfig.profileSpecified && preparedConfig.profile === null);
     const invocationEnv = remote ? stringsOnly(ensurePathInEnv(env)) : localRuntimeEnv;
     if (remote) applyPreparedOmpAgentEnvironment(invocationEnv, preparedConfig, env.PI_CODING_AGENT_DIR ?? null);
+    if (githubPat) {
+      if (!invocationEnv.PI_CODING_AGENT_DIR) throw new Error("GitHub PAT runtime assets were not installed.");
+      applyGitHubPatEnvironment(invocationEnv, invocationEnv.PI_CODING_AGENT_DIR, githubPat);
+    }
+    const invocationProbeEnv = { ...invocationEnv };
+    delete invocationProbeEnv.GR_GITHUB_TOKEN;
     if (runtimeMcp?.workloadCommand) {
       await ensureAdapterExecutionTargetCommandResolvable(
         runtimeMcp.workloadCommand,
         runtimeTarget,
         cwd,
-        invocationEnv,
+        invocationProbeEnv,
         { timeoutSec: Math.min(timeoutSec || 15, 15) },
       );
     }
@@ -610,9 +626,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       command,
       runtimeTarget,
       cwd,
-      invocationEnv,
+      invocationProbeEnv,
     );
-    const loggedEnv = buildInvocationEnvForLogs(env, {
+    const loggedEnv = buildInvocationEnvForLogs(remote ? invocationEnv : env, {
       runtimeEnv: invocationEnv,
       includeRuntimeKeys: ["HOME"],
       resolvedCommand,
@@ -677,6 +693,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ...prompts.notes,
       canResume ? `Resuming OMP session ${savedSessionId}` : `Using fresh OMP session directory ${sessionDir}`,
       ...(remote ? ["Remote execution uses an ephemeral OMP session; remote runtime directories are per run."] : []),
+      ...(githubPat ? [`Explicit repository PAT: ${githubPat.login} (${githubPat.userId}), approved workspace ${githubPat.repository}; not a managed Paperclip GitHub grant.`] : []),
     ];
 
     const runAttempt = async (resumeSessionId: string | null): Promise<ProcessAttempt> => {

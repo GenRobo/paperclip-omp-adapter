@@ -43,7 +43,7 @@ npm install -g @oh-my-pi/pi-coding-agent@18.11.0
 After publishing this fork's package, install it in a running Paperclip instance with:
 
 ```bash
-paperclipai adapter install --payload-json '{"packageName":"@genrobo/paperclip-omp-adapter","version":"0.9.0"}' --json
+paperclipai adapter install --payload-json '{"packageName":"@genrobo/paperclip-omp-adapter","version":"0.10.0"}' --json
 ```
 
 To upgrade an existing installation:
@@ -159,7 +159,7 @@ bounded). It does not disable discovery providers, skills, rules, or unrelated
 OMP features. Configured ordinary overlays still apply before this policy.
 Temporary configuration is removed by the existing per-run cleanup.
 
-The seven tools are `gr_request_resource`, `gr_list_resources`,
+The base workload tools are `gr_request_resource`, `gr_list_resources`,
 `gr_resource_status`, `gr_application_tools`, `gr_call_application`,
 `gr_operation_status`, and `gr_release_resource`. Mutations require a
 caller-retained request/operation UUID: transport reconnection must reuse that
@@ -169,6 +169,14 @@ Completed operation results preserve actual MCP image/resource blocks and
 structured output, including failed application results with partial-mutation
 warnings and `isError: true`. Do not re-execute indeterminate edits; save desired
 state before explicit release.
+
+The workload server deadline is 900,000 ms so committed engineering source can
+transfer in bounded resumable batches. Native HTTP MCP servers retain their
+30-second deadline. OMP 18.11.0's `OMP_MCP_TIMEOUT_MS` overrides per-server values:
+leave it unset for this deployment. An override below 900,000 ms can interrupt
+source transfer before its progress receipt; do not treat that timeout as proof
+that nothing was accepted. Discover the deployed client's actual tool inventory;
+engineering-capable clients also provide `gr_freeze_source`.
 
 Development checks include `npm test` here and, in the client package,
 `npm run typecheck && npm test`. Deployment qualification must additionally
@@ -210,6 +218,65 @@ The adapter exposes the following configuration schema fields under an agent's a
 - `hooks` (textarea): Paths to hook files.
 - `extraArgs` (textarea): Raw additional flags passed to the OMP CLI.
 
+## Explicit selected-repository GitHub PAT
+
+This optional mode does **not** require Paperclip Cloud and does not manufacture
+a managed OAuth grant. It requires a Linux controller, an isolated remote native
+issue run with a GitHub policy capability, and `git`, `gh` and Node installed in
+the runner (`/usr/bin/git`, `/usr/bin/gh`, and trusted Node on `PATH`).
+
+Store a fine-grained PAT in the native secret store and bind it to the authorized
+engineer's `config.env.GR_GITHUB_TOKEN` using a native `secret_ref`. Never put the
+value in configuration files, repository URLs, this policy, or an operator's
+inherited environment. The native secret name `PAPERCLIP_GITHUB_TOKEN` also
+supports Paperclip's host-side private checkout; that company-level checkout
+facility is separate from exporting a token to an agent.
+
+Set the **host** environment
+`PAPERCLIP_OMP_GITHUB_PAT_POLICY=/etc/gr/github/policy.json` and mount a regular,
+operator-owned policy read-only, without group/other write permission:
+
+```json
+{
+  "schemaVersion": 1,
+  "companies": {
+    "11111111-1111-4111-8111-111111111111": {
+      "agents": {
+        "22222222-2222-4222-8222-222222222222": {
+          "repositories": ["GenRobo/paperclip-omp-adapter"]
+        }
+      }
+    }
+  }
+}
+```
+
+The native workspace must identify an allowlisted HTTPS `github.com` repository.
+Before export, the adapter checks the native run policy: only an eligible run
+with **absent** managed identity can use this mode. Unavailable, revoked,
+low-trust or already-configured managed identity is not a fallback opportunity.
+GitHub `/user` and repository responses establish the real token owner's
+identity and repository visibility; actual push/PR operations still enforce
+GitHub permissions. Token-free run-local launchers clear ambient credentials,
+use a URL-scoped HTTPS Git helper, and set the verified owner's noreply Git
+identity. Local credential-free Git archive operations remain usable.
+
+Grant only selected repositories and necessary Contents/PR permissions, with
+expiry. GitHub permissions and branch protection are the authority ceiling:
+this is not an egress sandbox around an agent that possesses the token, does
+not create a bot identity, and does not prohibit direct branch writes by itself.
+Public-repository readability is not proof of a selected write grant. Do not run
+untrusted repository scripts in this credential-bearing runner; send committed
+source to the credential-free Slurm test environment. Stop affected runs before
+rotating/rebinding/revoking access, then revoke the old PAT at GitHub. Admission
+policy is checked at run start, not a replacement for provider revocation.
+
+The POSIX test suite exercises actual Git commits, credential-helper host
+scoping, login-shell startup and anonymous source export, plus denied actor,
+repository and native-policy cases. Real native GitHub push/PR qualification
+requires an owner-provided selected-repository PAT; fixture tests do not prove
+that external authorization.
+
 ## Development
 
 ### Building and Testing
@@ -228,7 +295,7 @@ Pack the local repository and install the tarball directly into your Paperclip i
 
 ```bash
 TARBALL=$(npm pack)
-paperclipai adapter install --payload-json "{\"packageName\":\"$PWD/$TARBALL\",\"version\":\"0.9.0\"}" --json
+paperclipai adapter install --payload-json "{\"packageName\":\"$PWD/$TARBALL\",\"version\":\"0.10.0\"}" --json
 ```
 
 ### Maintaining this fork
@@ -244,6 +311,12 @@ npm run pack:check
 ```
 
 The smoke suite exercises the public server adapter's denied local/missing/malformed targets, immutable host policy, explicit model catalog, and remote runner failure propagation without local fallback. Existing policy-off execution tests cover the normal library behavior. Remote deployment acceptance additionally needs a real SSH/sandbox integration run; the smoke runner failure fixture does not claim a successful remote execution.
+
+### Changes in 0.10.0
+
+- Added opt-in host-owned company/agent/repository PAT grants, native trust-policy preflight and verified GitHub-owner identity without Paperclip Cloud.
+- Added isolated token-free Git/gh launchers; no ambient credential fallback or PAT-bearing installation/version probes.
+- Increased the persistent workload MCP deadline to support bounded engineering source transfers.
 
 ### Changes in 0.9.0
 

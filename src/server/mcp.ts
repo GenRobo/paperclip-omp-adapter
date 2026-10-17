@@ -76,7 +76,7 @@ export function createRuntimeMcpPlan(
   }
   for (const server of nativeServers) addHttp(server.connectionId, server.url, server.token);
   if (workloadCommand) {
-    servers[WORKLOAD_SERVER] = { type: "stdio", command: workloadCommand, args: [], timeout: 30_000 };
+    servers[WORKLOAD_SERVER] = { type: "stdio", command: workloadCommand, args: [], timeout: 900_000 };
     guidance.push("Use gr-workloads MCP tools for this issue's persistent applications. Keep caller request/operation UUIDs stable across reconnects and turns. Poll gr_operation_status for completion; its images are real tool image content. Never repeat an indeterminate edit with a new ID. Save work before explicitly releasing a lease.");
   }
   if (Object.keys(servers).length === 0 && !operatorConfig) return null;

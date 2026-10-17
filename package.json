@@ -1,6 +1,6 @@
 {
   "name": "@genrobo/paperclip-omp-adapter",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "External Paperclip adapter for the Oh My Pi coding-agent CLI",
   "type": "module",
   "license": "MIT",
@@ -47,7 +47,7 @@
     "build": "tsc",
     "prepare": "npm run build",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node test/smoke.mjs && node --test test/mcp.test.mjs",
+    "test": "npm run build && node test/smoke.mjs && node --test test/mcp.test.mjs test/github-pat.test.mjs",
     "pack:check": "npm pack --dry-run"
   },
   "dependencies": {
