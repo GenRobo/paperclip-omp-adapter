@@ -458,8 +458,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
     const configuredEnv = parseObject(config.env);
     const githubPat = await createGitHubPatPlan({
-      companyId: agent.companyId, agentId: agent.id, issueId,
+      companyId: agent.companyId, projectId: asString(workspace.projectId, ""), agentId: agent.id, issueId,
       repoUrl: asString(workspace.repoUrl, ""), remote, env: configuredEnv,
+      secretManifest: parseObject(context.paperclipSecrets).manifest,
     });
     if (githubPat) {
       if (!preparedConfig.agentDir) throw new Error("GitHub PAT execution requires an isolated runtime asset directory.");

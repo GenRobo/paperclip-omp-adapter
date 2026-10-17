@@ -27,15 +27,18 @@ async function readPolicy(filename: string): Promise<RecordValue> {
       throw new Error("GitHub PAT policy must be a bounded, trusted file without group/other write permission.");
     }
     const policy = record(JSON.parse(await file.readFile("utf8")));
-    if (policy.schemaVersion !== 1) throw new Error("Unsupported GitHub PAT policy version.");
+    if (policy.schemaVersion !== 2) throw new Error("Unsupported GitHub PAT policy version.");
     const companies = record(policy.companies);
     for (const [companyId, company] of Object.entries(companies)) {
       if (!UUID.test(companyId)) throw new Error("GitHub PAT policy requires canonical company UUIDs.");
-      for (const [agentId, grant] of Object.entries(record(record(company).agents))) {
-        const repositories = record(grant).repositories;
-        if (!UUID.test(agentId) || !Array.isArray(repositories) || !repositories.length ||
-            repositories.some(value => typeof value !== "string" || !REPOSITORY.test(value) || value.endsWith(".git"))) {
-          throw new Error("GitHub PAT grants require explicit agent UUIDs and owner/repository names, never wildcards.");
+      for (const [projectId, value] of Object.entries(record(record(company).projects))) {
+        const grant = record(value);
+        if (!UUID.test(projectId) || typeof grant.repository !== "string" ||
+            !REPOSITORY.test(grant.repository) || grant.repository.endsWith(".git") ||
+            typeof grant.secretId !== "string" || !UUID.test(grant.secretId) ||
+            !Array.isArray(grant.agents) || !grant.agents.length ||
+            grant.agents.some(agentId => typeof agentId !== "string" || !UUID.test(agentId))) {
+          throw new Error("GitHub PAT grants require an explicit project UUID, owner/repository, secret UUID and authorized agent UUIDs, never wildcards.");
         }
       }
     }
@@ -55,10 +58,10 @@ function workspaceRepository(value: string): string {
   return repository;
 }
 
-/** Opt-in authority: a host-owned grant AND a resolved native secret binding. Never inherit an operator token. */
+/** Opt-in authority: a host-owned project/repository grant AND its native secret binding. Never inherit an operator token. */
 export async function createGitHubPatPlan(input: {
-  companyId: string; agentId: string; issueId: string; repoUrl: string; remote: boolean;
-  env: RecordValue;
+  companyId: string; projectId: string; agentId: string; issueId: string; repoUrl: string; remote: boolean;
+  env: RecordValue; secretManifest?: unknown;
 }, operatorEnv: NodeJS.ProcessEnv = process.env, request: typeof fetch = fetch): Promise<GitHubPatPlan | null> {
   if (Object.keys(input.env).some(key => key.startsWith("PAPERCLIP_OMP_GITHUB_"))) {
     throw new Error("GitHub PAT policy and launcher authority are operator-owned, not agent environment settings.");
@@ -71,19 +74,30 @@ export async function createGitHubPatPlan(input: {
   }
   const companies = await readPolicy(filename);
   const company = companies[input.companyId];
-  const grant = company ? record(record(company).agents)[input.agentId] : undefined;
-  if (!grant) {
-    if (token) throw new Error("This company/agent has no explicit GitHub PAT grant.");
+  const grant = company ? record(record(company).projects)[input.projectId] : undefined;
+  if (!grant || !(record(grant).agents as string[]).includes(input.agentId)) {
+    if (token) throw new Error("This company/project/agent has no explicit GitHub PAT grant.");
     return null;
   }
   if (!input.remote || !UUID.test(input.issueId)) throw new Error("GitHub PAT execution requires an isolated remote native issue run.");
   if (typeof token !== "string" || !/^github_pat_[A-Za-z0-9_]{20,500}$/.test(token)) {
-    throw new Error("GitHub PAT execution requires a resolved fine-grained GR_GITHUB_TOKEN secret binding.");
+    throw new Error("GitHub PAT execution requires the project's resolved fine-grained GR_GITHUB_TOKEN secret binding.");
   }
   const repository = workspaceRepository(input.repoUrl);
-  const repositories = record(grant).repositories as string[];
-  if (!repositories.some(value => value.toLowerCase() === repository.toLowerCase())) {
-    throw new Error("The native workspace repository is outside this agent's GitHub PAT grant.");
+  if ((record(grant).repository as string).toLowerCase() !== repository.toLowerCase()) {
+    throw new Error("The native workspace repository does not match this project's GitHub PAT grant.");
+  }
+  // Pin native secret provenance, not just its variable name: project/routine
+  // configuration can reference another company secret. Never accept inline or
+  // ambiguous bindings merely because their value looks like a valid PAT.
+  const bindings = Array.isArray(input.secretManifest)
+    ? input.secretManifest.filter(value => value && typeof value === "object" &&
+        !Array.isArray(value) && value.envKey === TOKEN_VARIABLE)
+    : [];
+  if (bindings.length !== 1 || bindings[0].configPath !== `env.${TOKEN_VARIABLE}` ||
+      bindings[0].secretId !== record(grant).secretId || bindings[0].outcome !== "success" ||
+      typeof bindings[0].bindingId !== "string" || !UUID.test(bindings[0].bindingId)) {
+    throw new Error("GitHub PAT execution requires the operator-approved native secret binding.");
   }
   const brokerUrl = input.env.PAPERCLIP_GITHUB_BROKER_URL;
   const capability = input.env.PAPERCLIP_GITHUB_BROKER_TOKEN;

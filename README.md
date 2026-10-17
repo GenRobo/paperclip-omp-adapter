@@ -43,7 +43,7 @@ npm install -g @oh-my-pi/pi-coding-agent@18.11.0
 After publishing this fork's package, install it in a running Paperclip instance with:
 
 ```bash
-paperclipai adapter install --payload-json '{"packageName":"@genrobo/paperclip-omp-adapter","version":"0.10.0"}' --json
+paperclipai adapter install --payload-json '{"packageName":"@genrobo/paperclip-omp-adapter","version":"0.11.0"}' --json
 ```
 
 To upgrade an existing installation:
@@ -225,12 +225,18 @@ a managed OAuth grant. It requires a Linux controller, an isolated remote native
 issue run with a GitHub policy capability, and `git`, `gh` and Node installed in
 the runner (`/usr/bin/git`, `/usr/bin/gh`, and trusted Node on `PATH`).
 
-Store a fine-grained PAT in the native secret store and bind it to the authorized
-engineer's `config.env.GR_GITHUB_TOKEN` using a native `secret_ref`. Never put the
-value in configuration files, repository URLs, this policy, or an operator's
-inherited environment. The native secret name `PAPERCLIP_GITHUB_TOKEN` also
-supports Paperclip's host-side private checkout; that company-level checkout
-facility is separate from exporting a token to an agent.
+Store the PAT once as an organization secret named `PAPERCLIP_GITHUB_TOKEN`.
+In the authorized project's **Configuration → Env**, add `GR_GITHUB_TOKEN`,
+choose **Organization secret**, then **Create new secret…**. Enter the shared
+secret name and PAT, choose **Create & bind**, then **Save changes**. Other
+approved projects can select that existing secret instead of copying its value.
+The stored secret is organization-level; its environment binding is per-project.
+Never paste a PAT into a plain project variable, agent configuration, repository
+URL, this policy, or an operator's inherited environment.
+
+The native secret name also supports Paperclip's host-side private checkout
+when no managed GitHub identity is configured. That company-level facility is
+separate from exporting the token to a runner.
 
 Set the **host** environment
 `PAPERCLIP_OMP_GITHUB_PAT_POLICY=/etc/gr/github/policy.json` and mount a regular,
@@ -238,12 +244,14 @@ operator-owned policy read-only, without group/other write permission:
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "companies": {
     "11111111-1111-4111-8111-111111111111": {
-      "agents": {
-        "22222222-2222-4222-8222-222222222222": {
-          "repositories": ["GenRobo/paperclip-omp-adapter"]
+      "projects": {
+        "33333333-3333-4333-8333-333333333333": {
+          "repository": "example-org/project",
+          "secretId": "44444444-4444-4444-8444-444444444444",
+          "agents": ["22222222-2222-4222-8222-222222222222"]
         }
       }
     }
@@ -251,10 +259,14 @@ operator-owned policy read-only, without group/other write permission:
 }
 ```
 
-The native workspace must identify an allowlisted HTTPS `github.com` repository.
-Before export, the adapter checks the native run policy: only an eligible run
-with **absent** managed identity can use this mode. Unavailable, revoked,
-low-trust or already-configured managed identity is not a fallback opportunity.
+The native workspace must identify the exact authorized project and HTTPS
+`github.com` repository. The resolved `GR_GITHUB_TOKEN` must carry one successful
+native binding for the policy's secret UUID. Missing, substituted or ambiguous
+provenance fails closed before contacting GitHub. Before export, the adapter
+also checks native run policy: only an eligible run with **absent** managed
+identity can use this mode. Unavailable, revoked, low-trust or already-configured
+managed identity is not a fallback opportunity. Schema 1 policies are rejected;
+operators must migrate all grants before deploying this release.
 GitHub `/user` and repository responses establish the real token owner's
 identity and repository visibility; actual push/PR operations still enforce
 GitHub permissions. Token-free run-local launchers clear ambient credentials,
@@ -262,9 +274,12 @@ use a URL-scoped HTTPS Git helper, and set the verified owner's noreply Git
 identity. Local credential-free Git archive operations remain usable.
 
 Grant only selected repositories and necessary Contents/PR permissions, with
-expiry. GitHub permissions and branch protection are the authority ceiling:
-this is not an egress sandbox around an agent that possesses the token, does
-not create a bot identity, and does not prohibit direct branch writes by itself.
+expiry. A shared fine-grained PAT can cover multiple selected repositories under
+one resource owner. Every credential-bearing runner can technically access
+that entire selected set; project admission does not narrow GitHub's token scope.
+GitHub permissions and branch protection are the authority ceiling: this is not
+an egress sandbox, does not create a bot identity, and does not prohibit direct
+branch writes by itself. Bind it only to approved engineering projects.
 Public-repository readability is not proof of a selected write grant. Do not run
 untrusted repository scripts in this credential-bearing runner; send committed
 source to the credential-free Slurm test environment. Stop affected runs before
@@ -295,7 +310,7 @@ Pack the local repository and install the tarball directly into your Paperclip i
 
 ```bash
 TARBALL=$(npm pack)
-paperclipai adapter install --payload-json "{\"packageName\":\"$PWD/$TARBALL\",\"version\":\"0.10.0\"}" --json
+paperclipai adapter install --payload-json "{\"packageName\":\"$PWD/$TARBALL\",\"version\":\"0.11.0\"}" --json
 ```
 
 ### Maintaining this fork
@@ -311,6 +326,13 @@ npm run pack:check
 ```
 
 The smoke suite exercises the public server adapter's denied local/missing/malformed targets, immutable host policy, explicit model catalog, and remote runner failure propagation without local fallback. Existing policy-off execution tests cover the normal library behavior. Remote deployment acceptance additionally needs a real SSH/sandbox integration run; the smoke runner failure fixture does not claim a successful remote execution.
+
+### Changes in 0.11.0
+
+- Replaced agent-wide PAT grants with schema-2 project/repository/secret/agent admission.
+- Required native secret-binding provenance before PAT export; rejected missing, substituted and ambiguous bindings.
+- Documented shared organization-secret setup and the selected-repository authority ceiling.
+- Qualified POSIX adapter smoke, native-policy denial, and real Git identity/credential-helper/source-export behavior; external push/PR proof remains deployment-specific.
 
 ### Changes in 0.10.0
 

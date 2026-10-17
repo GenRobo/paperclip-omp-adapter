@@ -9,17 +9,22 @@ import { applyGitHubPatEnvironment, createGitHubPatPlan, materializeGitHubPatLau
 const companyId = "11111111-1111-4111-8111-111111111111";
 const agentId = "22222222-2222-4222-8222-222222222222";
 const issueId = "33333333-3333-4333-8333-333333333333";
+const projectId = "44444444-4444-4444-8444-444444444444";
+const otherProjectId = "55555555-5555-4555-8555-555555555555";
+const secretId = "66666666-6666-4666-8666-666666666666";
 const token = "github_pat_test_fixture_never_a_real_credential";
 const input = {
-  companyId, agentId, issueId, remote: true, repoUrl: "https://github.com/GenRobo/approved.git",
+  companyId, projectId, agentId, issueId, remote: true, repoUrl: "https://github.com/GenRobo/approved.git",
   env: { GR_GITHUB_TOKEN: token, PAPERCLIP_GITHUB_BROKER_URL: "http://127.0.0.1:8443", PAPERCLIP_GITHUB_BROKER_TOKEN: "native-fixture-capability" },
+  secretManifest: [{ secretId, bindingId: "77777777-7777-4777-8777-777777777777",
+    configPath: "env.GR_GITHUB_TOKEN", envKey: "GR_GITHUB_TOKEN", outcome: "success" }],
 };
 const posix = process.platform === "win32" ? test.skip : test;
-async function fixture(t) {
+async function fixture(t, projects = { [projectId]: { repository: "GenRobo/approved", secretId, agents: [agentId] } }) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-pat-test-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const filename = path.join(root, "policy.json");
-  await fs.writeFile(filename, JSON.stringify({ schemaVersion: 1, companies: { [companyId]: { agents: { [agentId]: { repositories: ["GenRobo/approved"] } } } } }), { mode: 0o600 });
+  await fs.writeFile(filename, JSON.stringify({ schemaVersion: 2, companies: { [companyId]: { projects } } }), { mode: 0o600 });
   return { root, filename, operatorEnv: { PAPERCLIP_OMP_GITHUB_PAT_POLICY: filename } };
 }
 function authority(status = "absent") {
@@ -41,6 +46,7 @@ posix("repository PAT requires both explicit actor grant and native eligible run
   const { operatorEnv } = await fixture(t);
   for (const altered of [
     { ...input, agentId: issueId }, { ...input, companyId: issueId },
+    { ...input, projectId: otherProjectId }, { ...input, projectId: "" },
     { ...input, repoUrl: "https://github.com/GenRobo/unapproved" },
     { ...input, repoUrl: "https://github.com.evil.invalid/GenRobo/approved" },
     { ...input, repoUrl: "https://credential@github.com/GenRobo/approved" },
@@ -64,6 +70,58 @@ posix("repository PAT requires both explicit actor grant and native eligible run
   assert.deepEqual(plan, { repository: "GenRobo/approved", login: "fixture-owner", userId: 42 });
   assert.equal(await createGitHubPatPlan({ ...input, agentId: issueId, env: {} }, operatorEnv, auth.request), null);
   await assert.rejects(createGitHubPatPlan(input, {}, auth.request), /operator-owned/);
+});
+
+posix("one engineer's admission is bound independently to each project's repository", async t => {
+  const { operatorEnv } = await fixture(t, {
+    [projectId]: { repository: "GenRobo/approved", secretId, agents: [agentId] },
+    [otherProjectId]: { repository: "GenRobo/second", secretId, agents: [agentId] },
+  });
+  for (const altered of [
+    { ...input, projectId: otherProjectId },
+    { ...input, repoUrl: "https://github.com/GenRobo/second" },
+  ]) {
+    const auth = authority();
+    await assert.rejects(createGitHubPatPlan(altered, operatorEnv, auth.request), /does not match/);
+    assert.equal(auth.githubRequests.length, 0);
+  }
+  const auth = authority();
+  assert.equal((await createGitHubPatPlan(input, operatorEnv, auth.request)).repository, "GenRobo/approved");
+  await assert.rejects(createGitHubPatPlan({
+    ...input, projectId: otherProjectId, repoUrl: "https://github.com/GenRobo/second",
+    env: { ...input.env, GR_GITHUB_TOKEN: undefined },
+  }, operatorEnv, auth.request), /project's resolved/);
+});
+
+posix("secret substitution and missing or ambiguous native provenance cannot export a PAT", async t => {
+  const { operatorEnv } = await fixture(t);
+  const binding = input.secretManifest[0];
+  for (const secretManifest of [
+    undefined, [], [{ ...binding, secretId: otherProjectId }],
+    [{ ...binding, outcome: "failure" }], [{ ...binding, bindingId: undefined }],
+    [{ ...binding, configPath: "env.OTHER_TOKEN" }],
+    [binding, { ...binding, secretId: otherProjectId }],
+  ]) {
+    const auth = authority();
+    await assert.rejects(createGitHubPatPlan({ ...input, secretManifest }, operatorEnv, auth.request), /operator-approved native secret/);
+    assert.equal(auth.githubRequests.length, 0);
+  }
+});
+
+posix("legacy agent-wide policy and ambiguous project grants fail closed", async t => {
+  const { filename, operatorEnv } = await fixture(t);
+  for (const policy of [
+    { schemaVersion: 1, companies: { [companyId]: { agents: { [agentId]: { repositories: ["GenRobo/approved"] } } } } },
+    { schemaVersion: 2, companies: { [companyId]: { projects: { [projectId]: { repository: "*", secretId, agents: [agentId] } } } } },
+    { schemaVersion: 2, companies: { [companyId]: { projects: { [projectId]: { repository: "GenRobo/approved", secretId, agents: ["*"] } } } } },
+    { schemaVersion: 2, companies: { [companyId]: { projects: { [projectId]: { repositories: ["GenRobo/approved", "GenRobo/second"], secretId, agents: [agentId] } } } } },
+    { schemaVersion: 2, companies: { [companyId]: { projects: { [projectId]: { repository: "GenRobo/approved", agents: [agentId] } } } } },
+  ]) {
+    await fs.writeFile(filename, JSON.stringify(policy));
+    const auth = authority();
+    await assert.rejects(createGitHubPatPlan(input, operatorEnv, auth.request));
+    assert.equal(auth.githubRequests.length, 0);
+  }
 });
 
 posix("policy symlinks and writable authority cannot grant repository access", async t => {
