@@ -273,6 +273,15 @@ GitHub permissions. Token-free run-local launchers clear ambient credentials,
 use a URL-scoped HTTPS Git helper, and set the verified owner's noreply Git
 identity. Local credential-free Git archive operations remain usable.
 
+**Host prerequisite:** secret provenance must describe the effective environment,
+not every earlier layer. Paperclip 2026.1012.0 concatenates manifests even when a
+later plain value overrides a secret reference. The GR deployment applies its
+native `secret-provenance.patch`: environment < agent < project < routine <
+trusted projection; an override invalidates the earlier binding, even with equal
+bytes. Do not deploy this mode on an unqualified host with stale manifests.
+The same host patch makes strict secret mode recognize the GitHub token variable
+names without treating `MAX_TOKENS` or `TOKEN_BUDGET` as credentials.
+
 Grant only selected repositories and necessary Contents/PR permissions, with
 expiry. A shared fine-grained PAT can cover multiple selected repositories under
 one resource owner. Every credential-bearing runner can technically access
@@ -283,8 +292,12 @@ branch writes by itself. Bind it only to approved engineering projects.
 Public-repository readability is not proof of a selected write grant. Do not run
 untrusted repository scripts in this credential-bearing runner; send committed
 source to the credential-free Slurm test environment. Stop affected runs before
-rotating/rebinding/revoking access, then revoke the old PAT at GitHub. Admission
-policy is checked at run start, not a replacement for provider revocation.
+rotating/rebinding/revoking access, then revoke the old PAT at GitHub. The policy
+pins a secret UUID, not a binding UUID or binding scope: the same approved secret
+bound at another native layer can still satisfy admission. Removing only the
+project reference is therefore not a complete revocation procedure; remove the
+operator grant to deny future launches. Admission is checked at run start, not a
+replacement for provider revocation.
 
 The POSIX test suite exercises actual Git commits, credential-helper host
 scoping, login-shell startup and anonymous source export, plus denied actor,
