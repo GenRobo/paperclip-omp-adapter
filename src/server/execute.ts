@@ -460,6 +460,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const githubPat = await createGitHubPatPlan({
       companyId: agent.companyId, projectId: asString(workspace.projectId, ""), agentId: agent.id, issueId,
       repoUrl: asString(workspace.repoUrl, ""), remote, env: configuredEnv,
+      workspaceMode: asString(workspace.mode, ""), workspaceStrategy: asString(workspace.strategy, ""),
+      executionWorkspaceId: asString(context.executionWorkspaceId, ""),
       secretManifest: parseObject(context.paperclipSecrets).manifest,
     });
     if (githubPat) {

@@ -15,6 +15,8 @@ const secretId = "66666666-6666-4666-8666-666666666666";
 const token = "github_pat_test_fixture_never_a_real_credential";
 const input = {
   companyId, projectId, agentId, issueId, remote: true, repoUrl: "https://github.com/GenRobo/approved.git",
+  workspaceMode: "isolated_workspace", workspaceStrategy: "git_worktree",
+  executionWorkspaceId: "88888888-8888-4888-8888-888888888888",
   env: { GR_GITHUB_TOKEN: token, PAPERCLIP_GITHUB_BROKER_URL: "http://127.0.0.1:8443", PAPERCLIP_GITHUB_BROKER_TOKEN: "native-fixture-capability" },
   secretManifest: [{ secretId, bindingId: "77777777-7777-4777-8777-777777777777",
     configPath: "env.GR_GITHUB_TOKEN", envKey: "GR_GITHUB_TOKEN", outcome: "success" }],
@@ -70,6 +72,24 @@ posix("repository PAT requires both explicit actor grant and native eligible run
   assert.deepEqual(plan, { repository: "GenRobo/approved", login: "fixture-owner", userId: 42 });
   assert.equal(await createGitHubPatPlan({ ...input, agentId: issueId, env: {} }, operatorEnv, auth.request), null);
   await assert.rejects(createGitHubPatPlan(input, {}, auth.request), /operator-owned/);
+});
+
+posix("shared or unproven task workspaces cannot receive repository credentials", async t => {
+  const { operatorEnv } = await fixture(t);
+  for (const changed of [
+    { workspaceMode: "shared_workspace", workspaceStrategy: "project_primary" },
+    { workspaceMode: "isolated_workspace", workspaceStrategy: "project_primary" },
+    { workspaceMode: undefined },
+    { executionWorkspaceId: "" },
+    { executionWorkspaceId: "not-a-native-workspace" },
+  ]) {
+    const auth = authority();
+    await assert.rejects(
+      createGitHubPatPlan({ ...input, ...changed }, operatorEnv, auth.request),
+      /per-issue native Git worktree/,
+    );
+    assert.equal(auth.githubRequests.length, 0);
+  }
 });
 
 posix("one engineer's admission is bound independently to each project's repository", async t => {

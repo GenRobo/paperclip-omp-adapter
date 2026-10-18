@@ -61,6 +61,7 @@ function workspaceRepository(value: string): string {
 /** Opt-in authority: a host-owned project/repository grant AND its native secret binding. Never inherit an operator token. */
 export async function createGitHubPatPlan(input: {
   companyId: string; projectId: string; agentId: string; issueId: string; repoUrl: string; remote: boolean;
+  workspaceMode: string; workspaceStrategy: string; executionWorkspaceId: string;
   env: RecordValue; secretManifest?: unknown;
 }, operatorEnv: NodeJS.ProcessEnv = process.env, request: typeof fetch = fetch): Promise<GitHubPatPlan | null> {
   if (Object.keys(input.env).some(key => key.startsWith("PAPERCLIP_OMP_GITHUB_"))) {
@@ -80,6 +81,10 @@ export async function createGitHubPatPlan(input: {
     return null;
   }
   if (!input.remote || !UUID.test(input.issueId)) throw new Error("GitHub PAT execution requires an isolated remote native issue run.");
+  if (input.workspaceMode !== "isolated_workspace" || input.workspaceStrategy !== "git_worktree" ||
+      !UUID.test(input.executionWorkspaceId)) {
+    throw new Error("GitHub PAT execution requires a per-issue native Git worktree; enable native isolated workspaces and the project's isolated-worktree policy before retrying.");
+  }
   if (typeof token !== "string" || !/^github_pat_[A-Za-z0-9_]{20,500}$/.test(token)) {
     throw new Error("GitHub PAT execution requires the project's resolved fine-grained GR_GITHUB_TOKEN secret binding.");
   }

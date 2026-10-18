@@ -43,7 +43,7 @@ npm install -g @oh-my-pi/pi-coding-agent@18.11.0
 After publishing this fork's package, install it in a running Paperclip instance with:
 
 ```bash
-paperclipai adapter install --payload-json '{"packageName":"@genrobo/paperclip-omp-adapter","version":"0.11.0"}' --json
+paperclipai adapter install --payload-json '{"packageName":"@genrobo/paperclip-omp-adapter","version":"0.11.1"}' --json
 ```
 
 To upgrade an existing installation:
@@ -225,6 +225,18 @@ a managed OAuth grant. It requires a Linux controller, an isolated remote native
 issue run with a GitHub policy capability, and `git`, `gh` and Node installed in
 the runner (`/usr/bin/git`, `/usr/bin/gh`, and trusted Node on `PATH`).
 
+Repository credential admission additionally requires trusted native workspace
+metadata identifying `isolated_workspace`, `git_worktree` and a canonical
+execution-workspace UUID. A remote container alone is insufficient: a disabled
+instance `enableIsolatedWorkspaces` flag can otherwise silently leave the
+durable checkout shared despite an isolated project policy. Enable that flag,
+keep `enableIsolatedWorkspacesByDefault:false` when non-repository projects
+should retain their existing behavior, and configure the engineering project's
+enabled policy with `defaultMode:"isolated_workspace"` and
+`workspaceStrategy:{type:"git_worktree",baseRef:"origin/main"}`. Shared,
+missing or inconsistent workspace metadata fails before GitHub credential use;
+there is no shared-checkout fallback.
+
 Store the PAT once as an organization secret named `PAPERCLIP_GITHUB_TOKEN`.
 In the authorized project's **Configuration → Env**, add `GR_GITHUB_TOKEN`,
 choose **Organization secret**, then **Create new secret…**. Enter the shared
@@ -323,7 +335,7 @@ Pack the local repository and install the tarball directly into your Paperclip i
 
 ```bash
 TARBALL=$(npm pack)
-paperclipai adapter install --payload-json "{\"packageName\":\"$PWD/$TARBALL\",\"version\":\"0.11.0\"}" --json
+paperclipai adapter install --payload-json "{\"packageName\":\"$PWD/$TARBALL\",\"version\":\"0.11.1\"}" --json
 ```
 
 ### Maintaining this fork
@@ -339,6 +351,11 @@ npm run pack:check
 ```
 
 The smoke suite exercises the public server adapter's denied local/missing/malformed targets, immutable host policy, explicit model catalog, and remote runner failure propagation without local fallback. Existing policy-off execution tests cover the normal library behavior. Remote deployment acceptance additionally needs a real SSH/sandbox integration run; the smoke runner failure fixture does not claim a successful remote execution.
+
+### Changes in 0.11.1
+
+- Reject repository PAT admission unless native per-issue Git-worktree identity is present; a remote sandbox no longer masks a shared durable checkout.
+- Add a regression for shared/inconsistent/missing workspace authority, reproduced against 0.11.0 before the fix.
 
 ### Changes in 0.11.0
 
