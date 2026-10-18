@@ -17,7 +17,7 @@ This adapter integrates OMP into Paperclip as an external adapter module (`omp_l
 | Model Discovery | Dynamic model list and badge updates | `omp models --json` and `omp models refresh --json` |
 | Execution Mode | Headless execution per heartbeat run | `omp --mode json -p` |
 | Session Resume | Resumes conversation across runs | `--session-dir <dir> --resume <id>` |
-| Multi-Workspace | Multi-workspace context synchronization | `--add-dir <path>` (repeatable) |
+| Multi-Workspace | Local roots; only realized/staged roots on remote targets | `--add-dir <path>` (repeatable) |
 | Thinking / Reasoning | Live transcript streaming plus durable `omp.thinking` run events | `--thinking <level>`, `--print-thoughts` |
 | Tool Events | Real-time tool calls, progress updates, durable `omp.tool` run events | Maps `tool_execution_*` to Paperclip entries |
 | Skills Integration | Paperclip workspace skills synchronization | Links skills into `~/.omp/agent/skills` |
@@ -43,7 +43,7 @@ npm install -g @oh-my-pi/pi-coding-agent@18.11.0
 After publishing this fork's package, install it in a running Paperclip instance with:
 
 ```bash
-paperclipai adapter install --payload-json '{"packageName":"@genrobo/paperclip-omp-adapter","version":"0.11.1"}' --json
+paperclipai adapter install --payload-json '{"packageName":"@genrobo/paperclip-omp-adapter","version":"0.11.2"}' --json
 ```
 
 To upgrade an existing installation:
@@ -85,6 +85,8 @@ The policy is enabled by `true` (case-insensitive, surrounding whitespace ignore
 - Host quota discovery returns `ok: false` and no windows without invoking `omp usage`. Environment tests with a valid remote target still perform their OMP model/auth probes remotely.
 
 Configure the Paperclip host to permit this external adapter on the selected remote environment and supply a real provider runner/SSH connection. This package does not provision an environment or make an otherwise ineligible host dispatch remote.
+
+Remote command arguments and prompt workspace context use the SDK's realized workspace view, not the original host paths. Unstaged workspace hints retain metadata but lose their inaccessible directory. Configured `addDirs`, like extensions/config files, must be within the selected synchronized workspace and are remapped into the runner; an outside path is rejected rather than advertised as accessible. This does not stage arbitrary additional project trees.
 
 ### Native MCP and persistent workload tools (OMP 18.11.0)
 
@@ -335,7 +337,7 @@ Pack the local repository and install the tarball directly into your Paperclip i
 
 ```bash
 TARBALL=$(npm pack)
-paperclipai adapter install --payload-json "{\"packageName\":\"$PWD/$TARBALL\",\"version\":\"0.11.1\"}" --json
+paperclipai adapter install --payload-json "{\"packageName\":\"$PWD/$TARBALL\",\"version\":\"0.11.2\"}" --json
 ```
 
 ### Maintaining this fork
@@ -351,6 +353,12 @@ npm run pack:check
 ```
 
 The smoke suite exercises the public server adapter's denied local/missing/malformed targets, immutable host policy, explicit model catalog, and remote runner failure propagation without local fallback. Existing policy-off execution tests cover the normal library behavior. Remote deployment acceptance additionally needs a real SSH/sandbox integration run; the smoke runner failure fixture does not claim a successful remote execution.
+
+### Changes in 0.11.2
+
+- Reuse native remote workspace shaping for OMP directory arguments and runtime prompt context. Reproduced the previous failure in a real runner: an unstaged host project path was passed through `--add-dir`, and the agent's Bash tool rejected that working directory.
+- Resolve remote directory arguments with POSIX semantics and constrain explicit `addDirs` to the synchronized workspace.
+- Added path projection/escape regression coverage and removed an incidental flag-presence test. POSIX smoke, all 17 GitHub/MCP tests, typecheck and package validation passed; deployment-specific inference remains a separate acceptance check.
 
 ### Changes in 0.11.1
 

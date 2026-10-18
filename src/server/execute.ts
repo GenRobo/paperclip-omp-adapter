@@ -110,7 +110,7 @@ function stringList(value: unknown, commaSeparated = false): string[] {
     .filter(Boolean);
 }
 
-const REMOTE_PATH_FIELDS = ["configFiles", "extensions", "hooks", "pluginDirs"] as const;
+const REMOTE_PATH_FIELDS = ["configFiles", "extensions", "hooks", "pluginDirs", "addDirs"] as const;
 
 export function rewriteRemoteConfigPaths(
   config: Record<string, unknown>,
@@ -201,6 +201,7 @@ function buildOmpArgs(input: {
   config: Record<string, unknown>;
   context?: Record<string, unknown>;
   cwd?: string;
+  remote?: boolean;
   systemPrompt: string;
   userPrompt: string;
   sessionDir: string;
@@ -281,10 +282,11 @@ function buildOmpArgs(input: {
     if (input.resumeSessionId) args.push("--resume", input.resumeSessionId);
   }
 
-  const primaryCwd = input.cwd ? path.resolve(input.cwd) : "";
+  const directoryPath = input.remote ? path.posix : path;
+  const primaryCwd = input.cwd ? directoryPath.resolve(input.cwd) : "";
   const addedDirs = new Set<string>();
   for (const dir of stringList(config.addDirs)) {
-    const resolved = path.resolve(dir);
+    const resolved = directoryPath.resolve(dir);
     if (resolved && resolved !== primaryCwd && !addedDirs.has(resolved)) {
       addedDirs.add(resolved);
       args.push("--add-dir=" + resolved);
@@ -295,7 +297,7 @@ function buildOmpArgs(input: {
       if (ws && typeof ws === "object" && !Array.isArray(ws)) {
         const wsCwd = asString((ws as Record<string, unknown>).cwd, "").trim();
         if (wsCwd) {
-          const resolved = path.resolve(wsCwd);
+          const resolved = directoryPath.resolve(wsCwd);
           if (resolved && resolved !== primaryCwd && !addedDirs.has(resolved)) {
             addedDirs.add(resolved);
             args.push("--add-dir=" + resolved);
@@ -476,7 +478,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         )
       : [];
     let effectiveExecutionCwd = executionTarget?.kind === "remote" ? executionTarget.remoteCwd : cwd;
-    refreshPaperclipWorkspaceEnvForExecution({
+    let executionWorkspace = refreshPaperclipWorkspaceEnvForExecution({
       env,
       envConfig: {},
       workspaceCwd,
@@ -563,7 +565,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       runtimeRootDir = preparedTarget.runtimeRootDir;
       applyPreparedOmpAgentEnvironment(env, preparedConfig, preparedTarget.assetDirs.agentDir ?? null);
       if (adapterExecutionTargetUsesManagedHome(executionTarget) && runtimeRootDir) env.HOME = runtimeRootDir;
-      refreshPaperclipWorkspaceEnvForExecution({
+      executionWorkspace = refreshPaperclipWorkspaceEnvForExecution({
         env,
         envConfig: {},
         workspaceCwd,
@@ -581,6 +583,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       });
       applyPreparedOmpAgentEnvironment(env, preparedConfig, preparedTarget.assetDirs.agentDir ?? null);
     }
+    // Reuse the SDK's realized workspace view: unstaged host paths must not
+    // become advertised OMP directories or runtime template paths.
+    const executionContext = remote ? {
+      ...context,
+      paperclipWorkspace: {
+        ...workspace,
+        cwd: executionWorkspace.workspaceCwd,
+        worktreePath: executionWorkspace.workspaceWorktreePath,
+      },
+      paperclipWorkspaces: executionWorkspace.workspaceHints,
+    } : context;
 
     const runtimeTarget = overrideAdapterExecutionTargetRemoteCwd(executionTarget, effectiveExecutionCwd);
     if (remote && adapterExecutionTargetUsesPaperclipBridge(runtimeTarget)) {
@@ -680,7 +693,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
     const prompts = await buildPrompts({
       config: executionConfig,
-      context,
+      context: executionContext,
       agent,
       runId,
       resumedSession: canResume,
@@ -702,8 +715,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const runAttempt = async (resumeSessionId: string | null): Promise<ProcessAttempt> => {
       const args = buildOmpArgs({
         config: executionConfig,
-        context,
-        cwd,
+        context: executionContext,
+        cwd: effectiveExecutionCwd,
+        remote,
         systemPrompt: prompts.systemPrompt,
         userPrompt: prompts.userPrompt,
         sessionDir,

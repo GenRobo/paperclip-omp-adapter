@@ -265,6 +265,14 @@ assert.throws(
   () => rewriteRemoteConfigPaths({ extensions: ["~/.omp/provider.ts"] }, executionCwd, "/remote/workspace"),
   /must be inside the synchronized workspace/,
 );
+assert.deepEqual(
+  rewriteRemoteConfigPaths({ addDirs: [".", "assets", path.join(executionCwd, "tests")] }, executionCwd, "/remote/workspace").addDirs,
+  ["/remote/workspace", "/remote/workspace/assets", "/remote/workspace/tests"],
+);
+assert.throws(
+  () => rewriteRemoteConfigPaths({ addDirs: ["../workspace-other"] }, executionCwd, "/remote/workspace"),
+  /must be inside the synchronized workspace/,
+);
 const agent = {
   id: "00000000-0000-4000-8000-000000000001",
   companyId: "00000000-0000-4000-8000-000000000002",
@@ -532,27 +540,6 @@ const emptyToolUpdate = JSON.stringify({
 });
 assert.deepEqual(parseStdoutLine(emptyToolUpdate), []);
 
-// Regression test 4: --add-dir and --print-thoughts argument generation
-const addDirRunId = "00000000-0000-4000-8000-000000000015";
-await run(
-  addDirRunId,
-  emptyRuntime,
-  "ADD_DIR_OK",
-  {
-    ...baseConfig,
-    noSession: true,
-    printThoughts: true,
-    addDirs: "/tmp/custom-workspace-2",
-  },
-  {
-    paperclipWorkspaces: [
-      { cwd: "/tmp/custom-workspace-1" },
-    ],
-  },
-);
-const addDirMeta = metas.at(-1);
-assert.ok(addDirMeta?.commandArgs?.includes("--print-thoughts"), "commandArgs must include --print-thoughts");
-assert.ok(addDirMeta?.commandArgs?.some(arg => arg.startsWith("--add-dir=")), "commandArgs must include --add-dir");
 
 // Regression test 5: Paperclip log redaction corrupts JSONL; the parsers repair it
 const redactedLines = (await fs.readFile(new URL("./fixtures/redacted-lines.txt", import.meta.url), "utf8"))

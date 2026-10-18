@@ -431,7 +431,7 @@ export async function getConfigSchema(): Promise<AdapterConfigSchema> {
         key: "addDirs",
         label: "Secondary workspaces",
         type: "textarea",
-        hint: "One workspace root path per line passed to OMP via --add-dir.",
+        hint: "One workspace root per line. Remote runs require paths inside the synchronized workspace and remap them into the runner; unstaged host directories are not available.",
         group: "Runtime",
       },
       {
