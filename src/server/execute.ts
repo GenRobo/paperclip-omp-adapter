@@ -58,6 +58,7 @@ import {
 } from "./parse.js";
 import { classifyOmpFailure } from "./failure.js";
 import { createOmpProgressReporter } from "./progress.js";
+import { boundOmpResultJson } from "./result.js";
 import { ensureOmpSkills } from "./skills.js";
 import { remoteOmpTargetPolicyCheck } from "./policy.js";
 import { assertRuntimeMcpConfig, bridgedRuntimeMcpEnv, createRuntimeMcpPlan, MCP_OVERLAY_FILENAME, rejectRuntimeMcpSettingsConflicts } from "./mcp.js";
@@ -919,7 +920,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         ...(attempt.parsed.costUsd > 0 ? { cacheAdjustedCostUsd: attempt.parsed.costUsd } : {}),
         summary: parsedError ? null : attempt.parsed.finalMessage ?? attempt.parsed.messages.at(-1) ?? null,
         clearSession: retriedFresh && !resolvedSessionId,
-        resultJson: {
+        resultJson: boundOmpResultJson({
+          runId,
           ...(executionRecovery?.kind === "interrupted"
             ? { executionCancellation: { state: "acknowledged" } }
             : {}),
@@ -939,7 +941,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                 },
               }
             : {}),
-        },
+        }),
       };
       return result;
     };

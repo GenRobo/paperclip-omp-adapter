@@ -48,6 +48,43 @@ applicable terminal event determines this cause: yielded flags, tool failures,
 timeout-like text and recovered model failures are not deadline evidence.
 The adapter does not replay tools or promise preserved remote sessions.
 
+### Persisted result metadata and operation evidence
+
+Version 0.11.4 bounds adapter-owned `resultJson` to **48 KiB of UTF-8
+`JSON.stringify` output**. This leaves 16 KiB below the native 64 KiB retrieval
+cutoff for native-added receipts; it is not a bound on metadata subsequently
+added by Paperclip. Small ordinary results keep their existing fields and
+values. Usage, cost, session metadata, cancellation acknowledgement, and the
+explicit OMP termination cause are not inferred from truncated output.
+
+Only persisted presentation metadata is reduced. Each non-tool section has a
+3 KiB serialized budget; tool calls share 24 KiB, with a 6 KiB presentation
+budget per call and up to 2 KiB of exact structured identifiers when reduced.
+Recent calls take priority, retained calls remain chronological, and
+`toolCallsTotal`/`toolCallsOmitted` report incomplete inventories. Nested samples
+are limited to 12 levels and 128 entries per container. MCP image `data`,
+resource `blob`, and recognized base64 data URLs are replaced by explicit
+omission text. Long strings include a truncation marker, not a complete receipt.
+
+Reduced results carry `truncated`, `truncationReason`, `truncatedFields`, and a
+`nativeRunLog` containing the run ID and authenticated
+`/api/heartbeat-runs/<runId>/log` path. Reduced calls carry their own truncation
+marker and an `identifiers` index of exact operation/request/tool/resource/
+artifact/session IDs found in structured payloads and small JSON text receipts.
+`identifiersComplete: false` means the bounded index could not inspect or retain
+all structured IDs (for example, JSON text over 64 KiB); it never asserts that
+unstructured prose has been exhaustively indexed.
+
+The native `onLog` stream remains byte-for-byte unchanged, including full JSONL,
+image/resource payloads, and operation receipts. Failure/deadline classification
+still uses the original parsed evidence. Recover complete operation evidence
+from the native run log and actual operation ledger; a reduced tool result is
+**not** authority to replay an uncertain mutation or proof that it succeeded.
+The log locator assumes native log retention and access authorization; it is
+not a new attachment API or a guarantee that a failed log sink retained bytes.
+Historical oversized database rows are unchanged and still require safe native
+read projection.
+
 ## Installation
 
 ### Via Paperclip CLI
@@ -55,7 +92,7 @@ The adapter does not replay tools or promise preserved remote sessions.
 After publishing this fork's package, install it in a running Paperclip instance with:
 
 ```bash
-paperclipai adapter install --payload-json '{"packageName":"@genrobo/paperclip-omp-adapter","version":"0.11.3"}' --json
+paperclipai adapter install --payload-json '{"packageName":"@genrobo/paperclip-omp-adapter","version":"0.11.4"}' --json
 ```
 
 To upgrade an existing installation:
@@ -349,7 +386,7 @@ Pack the local repository and install the tarball directly into your Paperclip i
 
 ```bash
 TARBALL=$(npm pack)
-paperclipai adapter install --payload-json "{\"packageName\":\"$PWD/$TARBALL\",\"version\":\"0.11.3\"}" --json
+paperclipai adapter install --payload-json "{\"packageName\":\"$PWD/$TARBALL\",\"version\":\"0.11.4\"}" --json
 ```
 
 ### Maintaining this fork
@@ -365,6 +402,12 @@ npm run pack:check
 ```
 
 The smoke suite exercises the public server adapter's denied local/missing/malformed targets, immutable host policy, explicit model catalog, and remote runner failure propagation without local fallback. Existing policy-off execution tests cover the normal library behavior. Remote deployment acceptance additionally needs a real SSH/sandbox integration run; the smoke runner failure fixture does not claim a successful remote execution.
+
+### Changes in 0.11.4
+
+- Bound adapter-owned persisted result metadata to 48 KiB UTF-8 without changing canonical streamed logs, usage/session accounting, deadline classification, or retry policy.
+- Replace embedded image/resource bytes with explicit omissions; retain useful operation/tool identifiers, incomplete-inventory markers, and the native run-log locator instead of manufacturing complete receipts.
+- Add large image-bearing execution, retained control evidence, multibyte/escaped JSON bound, and ordinary small-result regressions.
 
 ### Changes in 0.11.3
 

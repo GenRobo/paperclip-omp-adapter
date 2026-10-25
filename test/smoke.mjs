@@ -12,6 +12,7 @@ import {
 import { classifyOmpFailure } from "../dist/server/failure.js";
 import { parseOmpJsonl } from "../dist/server/parse.js";
 import { createOmpProgressReporter } from "../dist/server/progress.js";
+import { boundOmpResultJson, OMP_RESULT_JSON_MAX_BYTES } from "../dist/server/result.js";
 import { getOmpQuotaWindows } from "../dist/server/quota.js";
 import { resolveOmpProfile } from "../dist/server/profile.js";
 import { discoverOmpModels } from "../dist/server/models.js";
@@ -272,6 +273,99 @@ assert.equal(cancelledParse.termination, null);
 assert.deepEqual(cancelledParse.errors, ["User cancelled."]);
 assert.equal(cancelledParse.finalMessage, null, "an aborted assistant must not reuse a prior success summary");
 
+// Real MCP-shaped image/resource + structured and text receipt output. The
+// binary and large body are deliberately before the operation control evidence.
+function largeImageEvents() {
+  const result = {
+    content: [
+      { type: "image", mimeType: "image/png", data: "iVBORw0KGgo" + "A".repeat(2 * 1024 * 1024) },
+      { type: "resource", resource: { uri: "artifact://partial-render", mimeType: "image/png", blob: "B".repeat(8192) } },
+      { type: "text", text: JSON.stringify({ operationId: "operation-text-receipt", status: "indeterminate", warning: "Do not replay this mutation." }) },
+      { type: "text", text: "界😀\\\"\n".repeat(8192) },
+    ],
+    structuredContent: {
+      operation_id: "operation-structured-receipt",
+      requestId: "request-receipt",
+      status: "failed",
+      partialMutation: true,
+      warning: "Partial mutation; recover through the operation ledger, not replay.",
+      artifactPath: "/workspace/partial.glb",
+    },
+    isError: true,
+  };
+  const message = {
+    role: "assistant", timestamp: 22, stopReason: "toolUse",
+    provider: "fake-provider", model: "fake-model",
+    content: [{ type: "text", text: "Rendering remains incomplete." }],
+    usage: { input: 17, output: 7, cacheRead: 3, cost: { total: 0.005 } },
+  };
+  return [
+    { type: "tool_execution_start", toolCallId: "image-call", toolName: "gr_call_application", args: { requestId: "request-argument", operationId: "operation-argument", code: "render()" } },
+    { type: "tool_execution_end", toolCallId: "image-call", toolName: "gr_call_application", result, isError: true },
+    { type: "turn_end", message },
+    { type: "agent_end", isTerminal: true, termination: { reason: "deadline", deadlineAt: 1792900800000 }, messages: [message] },
+  ];
+}
+function largeImageWire() {
+  // Native local process capture decodes each Buffer independently. ASCII JSON
+  // escapes avoid testing that upstream split-codepoint behavior here, while
+  // JSON.parse still gives the adapter the original multibyte payload.
+  return largeImageEvents().map((event) => {
+    const json = JSON.stringify(event).replace(/[^\x00-\x7f]/g, (character) =>
+      "\\u" + character.charCodeAt(0).toString(16).padStart(4, "0"));
+    return json + "\n";
+  }).join("");
+}
+const smallMetadata = {
+  stdout: "ordinary stdout\n", stderr: "", errors: [], unknownLines: [],
+  toolCalls: [{ toolCallId: "small-call", toolName: "read", args: { path: "a.txt" }, result: { content: [{ type: "text", text: "ok" }] }, isError: false }],
+  capabilityManifest: { bindings: ["omp-jsonl"], limits: ["one-process-per-heartbeat"] },
+};
+assert.deepEqual(
+  boundOmpResultJson({ runId: "small-run", ...smallMetadata }),
+  smallMetadata,
+  "small ordinary metadata retains its semantic DTO without truncation fields",
+);
+const stressMetadata = boundOmpResultJson({
+  ...smallMetadata,
+  runId: "00000000-0000-4000-8000-000000000998",
+  stdout: "界😀\\\"\u0000".repeat(20000),
+  stderr: "terminal error: ".repeat(20000),
+  errors: ["terminal error: ".repeat(20000)],
+  unknownLines: Array.from({ length: 200 }, () => "界😀".repeat(500)),
+  staleSessionAttempt: { stdout: "old stdout".repeat(20000), stderr: "old stderr".repeat(20000) },
+  executionCancellation: { state: "acknowledged" },
+  ompTermination: deadlineTermination,
+  toolCalls: Array.from({ length: 200 }, (_, index) => ({
+    toolCallId: `stress-${index}`, toolName: "gr_call_application", isError: true,
+    args: { operationId: `operation-${index}`, payload: "界😀".repeat(2000) },
+    result: { error: "partial mutation", content: [{ type: "text", text: "界😀\\\"\u0000".repeat(2000) }] },
+  })),
+});
+assert.equal(OMP_RESULT_JSON_MAX_BYTES, 48 * 1024);
+assert.ok(Buffer.byteLength(JSON.stringify(stressMetadata), "utf8") <= OMP_RESULT_JSON_MAX_BYTES);
+assert.equal(stressMetadata.truncated, true);
+assert.deepEqual(stressMetadata.ompTermination, deadlineTermination);
+assert.deepEqual(stressMetadata.executionCancellation, { state: "acknowledged" });
+assert.ok(stressMetadata.toolCallsOmitted > 0);
+assert.equal(stressMetadata.toolCallsTotal, 200);
+assert.equal(stressMetadata.toolCalls.length + stressMetadata.toolCallsOmitted, 200);
+assert.equal(stressMetadata.toolCalls.at(-1).toolCallId, "stress-199", "recent operation identifiers take precedence");
+assert.equal(stressMetadata.toolCalls.at(-1).isError, true);
+assert.match(stressMetadata.errors[0], /terminal error:.*truncated/s);
+assert.ok(stressMetadata.truncatedFields.includes("staleSessionAttempt"));
+assert.ok(!JSON.stringify(stressMetadata).includes("\\ud83d"), "UTF-8 truncation does not split surrogate pairs");
+const opaqueReceipt = JSON.stringify({ body: "x".repeat(70000), operationId: "recover-only-from-native-log" });
+const opaqueCall = {
+  toolCallId: "opaque-call", toolName: "gr_operation_status", args: { requestId: "known-request" },
+  result: { content: [{ type: "text", text: opaqueReceipt }] }, isError: true,
+};
+const opaqueMetadata = boundOmpResultJson({ runId: "opaque-run", ...smallMetadata, toolCalls: [opaqueCall] });
+assert.equal(opaqueMetadata.toolCalls[0].identifiersComplete, false);
+assert.ok(opaqueMetadata.toolCalls[0].identifiers.some((entry) => entry.value === "known-request"));
+assert.equal(opaqueMetadata.toolCalls[0].truncated, true);
+assert.equal(opaqueCall.result.content[0].text, opaqueReceipt, "presentation projection does not mutate original evidence");
+
 const fakeOmp = path.join(root, "fake-omp.mjs");
 await fs.writeFile(fakeOmp, `#!/usr/bin/env node
 import nodeFs from "node:fs";
@@ -303,6 +397,12 @@ if (deadlineScenario) {
   if (deadlineScenario.deadline) process.stderr.write("upstream service unavailable; Session 'old' not found.\\n");
   await new Promise((resolve) => { process.stdout.write("", resolve); });
   process.exit(deadlineScenario.exitCode ?? 0);
+}
+if (prompt === "LARGE_IMAGE_DEADLINE") {
+  const largeImageEvents = (${largeImageEvents.toString()});
+  process.stdout.write((${largeImageWire.toString()})());
+  await new Promise((resolve) => { process.stdout.write("", resolve); });
+  process.exit(0);
 }
 if (prompt.includes("ABRUPT_THINKING")) {
   console.log(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "last thought before the process stops" } }));
@@ -620,6 +720,56 @@ for (const [index, [name, scenario]] of Object.entries(deadlineCases).entries())
     if (name.endsWith("SUCCESS")) assert.match(result.summary, /Later work really succeeded|only quoted tool output/, name);
   }
 }
+
+const imageRunId = "00000000-0000-4000-8000-000000000997";
+const imageLogs = [];
+const imageRun = await adapter.execute({
+  runId: imageRunId, agent, runtime: emptyRuntime, config: baseConfig,
+  context: { expected: "LARGE_IMAGE_DEADLINE" },
+  onLog: async (stream, chunk) => { if (stream === "stdout") imageLogs.push(chunk); },
+});
+const imageWire = largeImageWire();
+const loggedImageWire = imageLogs.join("").slice(-imageWire.length);
+let firstImageDifference = 0;
+while (firstImageDifference < imageWire.length && loggedImageWire[firstImageDifference] === imageWire[firstImageDifference]) {
+  firstImageDifference += 1;
+}
+assert.ok(
+  loggedImageWire === imageWire,
+  `native onLog must preserve the full JSONL/image bytes; expected ${imageWire.length} chars, received suffix ${loggedImageWire.length}; first difference ${firstImageDifference}: ${JSON.stringify(loggedImageWire.slice(firstImageDifference, firstImageDifference + 120))}`,
+);
+assert.equal(imageRun.exitCode, 1);
+assert.equal(imageRun.errorCode, "omp_deadline_exceeded");
+assert.equal(imageRun.errorMessage, "OMP agent deadline exceeded.");
+assert.equal(imageRun.errorFamily, undefined);
+assert.equal(imageRun.timedOut, false);
+assert.equal(imageRun.summary, null);
+assert.equal(imageRun.sessionId, "fake-session-1");
+assert.deepEqual(imageRun.usage, { inputTokens: 17, outputTokens: 7, cachedInputTokens: 3 });
+assert.equal(imageRun.costUsd, 0.005);
+const imageMetadata = imageRun.resultJson;
+assert.ok(Buffer.byteLength(JSON.stringify(imageMetadata), "utf8") <= OMP_RESULT_JSON_MAX_BYTES);
+assert.deepEqual(imageMetadata.ompTermination, deadlineTermination);
+assert.deepEqual(imageMetadata.errors, ["OMP agent deadline exceeded."]);
+assert.equal(imageMetadata.stdoutTruncated, true);
+assert.deepEqual(imageMetadata.nativeRunLog, { runId: imageRunId, path: `/api/heartbeat-runs/${imageRunId}/log` });
+const imageCall = imageMetadata.toolCalls[0];
+assert.equal(imageCall.toolCallId, "image-call");
+assert.equal(imageCall.toolName, "gr_call_application");
+assert.equal(imageCall.isError, true);
+assert.equal(imageCall.truncated, true);
+assert.equal(imageMetadata.toolCallsOmitted, 0);
+assert.equal(imageCall.identifiersComplete, true);
+assert.equal(imageCall.result.structuredContent.status, "failed");
+assert.equal(imageCall.result.structuredContent.partialMutation, true);
+assert.match(imageCall.result.structuredContent.warning, /not replay/);
+for (const id of ["operation-argument", "request-argument", "operation-text-receipt", "operation-structured-receipt", "request-receipt"]) {
+  assert.ok(imageCall.identifiers.some((entry) => entry.value === id), `retained exact control identifier ${id}`);
+}
+assert.doesNotMatch(JSON.stringify(imageCall), /A{100}|B{100}/, "embedded image/resource bytes are omitted from tool metadata");
+assert.match(JSON.stringify(imageCall), /omitted from result metadata; see native run log/);
+assert.ok(imageWire.includes("operation-structured-receipt"));
+assert.ok(imageWire.includes("Partial mutation; recover through the operation ledger, not replay."));
 
 const ephemeralRunId = "00000000-0000-4000-8000-000000000013";
 const ephemeral = await run(ephemeralRunId, emptyRuntime, "EPHEMERAL_OK", {
@@ -983,10 +1133,8 @@ assert.equal(fresh.resultJson.executionCancellation, undefined);
 
 const hugeLogConfig = { ...baseConfig, timeoutSec: 120 };
 const huge = await run("00000000-0000-4000-8000-000000000019", emptyRuntime, "HUGE_LOG", hugeLogConfig);
-assert.ok(
-  huge.resultJson.stdout.length <= 4 * 1024 * 1024,
-  "the host caps captured stdout at 4 MiB, so this fixture must exceed the cap",
-);
+assert.ok(Buffer.byteLength(JSON.stringify(huge.resultJson), "utf8") <= OMP_RESULT_JSON_MAX_BYTES);
+assert.equal(huge.resultJson.stdoutTruncated, true);
 assert.ok(
   !huge.resultJson.stdout.includes("fake-session-1"),
   "the session header must fall outside the captured stdout window for this fixture",
