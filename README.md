@@ -36,6 +36,18 @@ Install OMP globally:
 npm install -g @oh-my-pi/pi-coding-agent@18.11.0
 ```
 
+Deadline classification requires an OMP runtime that emits the explicit terminal
+`agent_end.termination: { "reason": "deadline", "deadlineAt": <epoch milliseconds> }`
+contract; the unpatched 18.11.0 runtime does not supply it. The adapter reports
+`errorCode: "omp_deadline_exceeded"`, a nonzero effective exit code, an error
+message, and `resultJson.ompTermination` even if the CLI exits zero. `timedOut`
+still means the outer process watchdog fired, not the OMP agent-loop deadline.
+Partial usage, tool results and artifact receipts remain available, but an
+aborted run does not reuse an earlier success-like summary. Only the final
+applicable terminal event determines this cause: yielded flags, tool failures,
+timeout-like text and recovered model failures are not deadline evidence.
+The adapter does not replay tools or promise preserved remote sessions.
+
 ## Installation
 
 ### Via Paperclip CLI
@@ -43,7 +55,7 @@ npm install -g @oh-my-pi/pi-coding-agent@18.11.0
 After publishing this fork's package, install it in a running Paperclip instance with:
 
 ```bash
-paperclipai adapter install --payload-json '{"packageName":"@genrobo/paperclip-omp-adapter","version":"0.11.2"}' --json
+paperclipai adapter install --payload-json '{"packageName":"@genrobo/paperclip-omp-adapter","version":"0.11.3"}' --json
 ```
 
 To upgrade an existing installation:
@@ -337,7 +349,7 @@ Pack the local repository and install the tarball directly into your Paperclip i
 
 ```bash
 TARBALL=$(npm pack)
-paperclipai adapter install --payload-json "{\"packageName\":\"$PWD/$TARBALL\",\"version\":\"0.11.2\"}" --json
+paperclipai adapter install --payload-json "{\"packageName\":\"$PWD/$TARBALL\",\"version\":\"0.11.3\"}" --json
 ```
 
 ### Maintaining this fork
@@ -353,6 +365,12 @@ npm run pack:check
 ```
 
 The smoke suite exercises the public server adapter's denied local/missing/malformed targets, immutable host policy, explicit model catalog, and remote runner failure propagation without local fallback. Existing policy-off execution tests cover the normal library behavior. Remote deployment acceptance additionally needs a real SSH/sandbox integration run; the smoke runner failure fixture does not claim a successful remote execution.
+
+### Changes in 0.11.3
+
+- Honor explicit terminal OMP deadline causes independently of the last assistant stop reason; report a real unsuccessful adapter result without confusing the inner deadline with the outer watchdog or a provider failure.
+- Preserve partial usage and tool/artifact evidence, suppress stale final summaries, and render the deadline as a transcript error.
+- Add regressions for deadlines during tools, zero-exit deadline events, later real success, ordinary yields, tool-local timeouts, and misleading timeout text.
 
 ### Changes in 0.11.2
 

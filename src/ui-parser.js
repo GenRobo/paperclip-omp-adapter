@@ -125,14 +125,20 @@ function totalUsage(messages) {
  * @returns {Array<Record<string, unknown>>}
  */
 function parseAgentEnd(parsed, ts) {
-  if (parsed.willContinue === true) return [];
+  if (parsed.isTerminal === false || parsed.willContinue === true) return [];
   const messages = Array.isArray(parsed.messages) ? parsed.messages : [];
   const assistant = lastAssistant(messages);
   const usage = totalUsage(messages);
   const content = assistant ? extractContent(assistant.content) : { text: "", thinking: "" };
-  const errorMessage = assistant ? asString(assistant.errorMessage) : "";
-  const isError = assistant ? isAssistantError(assistant) : false;
-  const subtype = assistant ? asString(assistant.stopReason, isError ? "error" : "end") : "end";
+  const termination = asRecord(parsed.termination);
+  const deadline = termination?.reason === "deadline"
+    && typeof termination.deadlineAt === "number"
+    && Number.isFinite(termination.deadlineAt);
+  const errorMessage = deadline
+    ? "OMP agent deadline exceeded."
+    : assistant ? asString(assistant.errorMessage) : "";
+  const isError = deadline || (assistant ? isAssistantError(assistant) : false);
+  const subtype = deadline ? "deadline" : assistant ? asString(assistant.stopReason, isError ? "error" : "end") : "end";
 
   return [{
     kind: "result",

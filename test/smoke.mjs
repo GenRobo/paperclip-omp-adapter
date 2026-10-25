@@ -152,6 +152,126 @@ for (const baseUrl of [
   );
 }
 
+// The wire cause, not a tool error or assistant text, determines deadline failure.
+const deadlineTermination = { reason: "deadline", deadlineAt: 1792900800000 };
+const priorSuccess = {
+  role: "assistant", timestamp: 1, stopReason: "stop",
+  content: [{ type: "text", text: "Earlier work completed successfully." }],
+  usage: { input: 7, output: 3, cacheRead: 1, cost: { total: 0.002 } },
+};
+const interruptedToolTurn = {
+  role: "assistant", timestamp: 2, stopReason: "toolUse",
+  content: [{ type: "toolCall", id: "deadline-tool", name: "bash", arguments: { command: "build" } }],
+  usage: { input: 10, output: 4, cacheRead: 2, cost: { total: 0.003 } },
+};
+const laterSuccess = {
+  role: "assistant", timestamp: 3, stopReason: "stop",
+  content: [{ type: "text", text: "Later work really succeeded." }],
+};
+const failedAssistant = {
+  role: "assistant", timestamp: 4, stopReason: "error",
+  errorMessage: "Provider temporarily unavailable.", content: [],
+};
+const toolTimeoutResult = {
+  content: [{ type: "text", text: "Deadline exceeded; artifact saved at /workspace/partial.glb" }],
+  details: { artifactPath: "/workspace/partial.glb" },
+};
+const deadlineToolEvents = [
+  { type: "turn_end", message: priorSuccess },
+  { type: "message_end", message: interruptedToolTurn },
+  { type: "tool_execution_start", toolCallId: "deadline-tool", toolName: "bash", args: { command: "build" } },
+  { type: "tool_execution_end", toolCallId: "deadline-tool", toolName: "bash", isError: true, result: toolTimeoutResult },
+  { type: "turn_end", message: interruptedToolTurn },
+];
+const deadlineEnd = {
+  type: "agent_end", isTerminal: true, yielded: true,
+  termination: deadlineTermination, messages: [priorSuccess, interruptedToolTurn],
+};
+const successEnd = { type: "agent_end", isTerminal: true, messages: [laterSuccess] };
+const deadlineCases = {
+  DEADLINE_DURING_TOOL: { deadline: true, events: [...deadlineToolEvents, deadlineEnd] },
+  DEADLINE_NONZERO: { deadline: true, exitCode: 3, events: [...deadlineToolEvents, deadlineEnd] },
+  DEADLINE_STALE_STOP: { deadline: true, events: [
+    ...deadlineToolEvents, { ...deadlineEnd, messages: [priorSuccess] },
+  ] },
+  DEADLINE_NO_ASSISTANT: { deadline: true, events: [
+    ...deadlineToolEvents, { ...deadlineEnd, messages: [] },
+  ] },
+  DEADLINE_THEN_REAL_SUCCESS: { events: [
+    ...deadlineToolEvents, deadlineEnd, { type: "message_end", message: laterSuccess }, successEnd,
+  ] },
+  TOOL_LOCAL_TIMEOUT_SUCCESS: { events: [
+    ...deadlineToolEvents, { type: "message_end", message: laterSuccess }, successEnd,
+  ] },
+  ORDINARY_YIELD: { events: [
+    ...deadlineToolEvents, { type: "agent_end", isTerminal: true, yielded: true, messages: [interruptedToolTurn] },
+  ] },
+  TIMEOUT_TEXT_SUCCESS: { events: [
+    ...deadlineToolEvents, { ...successEnd, messages: [{
+      ...laterSuccess, content: [{ type: "text", text: "Deadline exceeded is only quoted tool output, not the run outcome." }],
+    }] },
+  ] },
+  MODEL_RETRY_SUCCESS: { events: [
+    ...deadlineToolEvents, { type: "message_end", message: failedAssistant },
+    { type: "auto_retry_end", success: false, finalError: "Provider temporarily unavailable." },
+    { type: "message_end", message: laterSuccess }, successEnd,
+  ] },
+};
+for (const [name, scenario] of Object.entries(deadlineCases)) {
+  const parsed = parseOmpJsonl(scenario.events.map((event) => JSON.stringify(event)).join("\n"));
+  assert.deepEqual(parsed.termination, scenario.deadline ? deadlineTermination : null, name);
+  assert.equal(parsed.errors.length, scenario.deadline ? 1 : 0, name);
+  if (scenario.deadline) assert.equal(parsed.finalMessage, null, name);
+  assert.deepEqual(parsed.usage, { inputTokens: 17, outputTokens: 7, cachedInputTokens: 3 }, name);
+  assert.equal(parsed.costUsd, 0.005, name);
+  assert.deepEqual(parsed.toolCalls[0].result, toolTimeoutResult, name);
+  assert.equal(parsed.toolCalls[0].isError, true, name);
+  assert.ok(parsed.messages.includes("Earlier work completed successfully."), "partial text evidence remains available");
+  const terminalEntries = parseStdoutLine(JSON.stringify(scenario.events.at(-1)), transcriptTs);
+  assert.equal(terminalEntries[0].isError, scenario.deadline === true, name);
+  if (scenario.deadline) {
+    assert.equal(terminalEntries[0].subtype, "deadline", name);
+    assert.equal(terminalEntries[0].text, "OMP agent deadline exceeded.", name);
+    assert.deepEqual(terminalEntries[0].errors, ["OMP agent deadline exceeded."], name);
+  }
+}
+const parseEvents = (events) => parseOmpJsonl(events.map((event) => JSON.stringify(event)).join("\n"));
+for (const event of [
+  { type: "message_end", message: laterSuccess },
+  { type: "turn_end", message: laterSuccess },
+  { type: "auto_retry_end", success: true },
+  { ...successEnd, isTerminal: false },
+  { ...successEnd, willContinue: true },
+]) {
+  const parsed = parseEvents([...deadlineToolEvents, deadlineEnd, event]);
+  assert.deepEqual(parsed.termination, deadlineTermination, "only a later applicable terminal event may replace the cause");
+  assert.equal(parsed.finalMessage, null);
+  assert.deepEqual(parsed.errors, ["OMP agent deadline exceeded."]);
+}
+for (const event of [
+  { ...deadlineEnd, isTerminal: false },
+  { ...deadlineEnd, willContinue: true },
+]) {
+  assert.equal(parseEvents([event]).termination, null);
+  assert.deepEqual(parseStdoutLine(JSON.stringify(event), transcriptTs), []);
+}
+for (const termination of [
+  undefined, null, { reason: "cancelled", deadlineAt: deadlineTermination.deadlineAt },
+  { reason: "deadline" }, { reason: "deadline", deadlineAt: "1792900800000" },
+  { reason: "deadline", deadlineAt: null },
+]) {
+  const event = { ...successEnd, termination };
+  assert.equal(parseEvents([event]).termination, null);
+  assert.equal(parseStdoutLine(JSON.stringify(event), transcriptTs)[0].isError, false);
+}
+const cancelledParse = parseEvents([
+  { type: "turn_end", message: priorSuccess },
+  { type: "agent_end", isTerminal: true, messages: [{ ...failedAssistant, stopReason: "aborted", errorMessage: "User cancelled." }] },
+]);
+assert.equal(cancelledParse.termination, null);
+assert.deepEqual(cancelledParse.errors, ["User cancelled."]);
+assert.equal(cancelledParse.finalMessage, null, "an aborted assistant must not reuse a prior success summary");
+
 const fakeOmp = path.join(root, "fake-omp.mjs");
 await fs.writeFile(fakeOmp, `#!/usr/bin/env node
 import nodeFs from "node:fs";
@@ -176,6 +296,14 @@ if (prompt.includes("BOOTSTRAP_FAIL")) {
   process.exit(1);
 }
 if (!noSession) console.log(JSON.stringify({ type: "session", id: sessionId }));
+const deadlineCases = ${JSON.stringify(deadlineCases)};
+const deadlineScenario = deadlineCases[prompt];
+if (deadlineScenario) {
+  for (const event of deadlineScenario.events) console.log(JSON.stringify(event));
+  if (deadlineScenario.deadline) process.stderr.write("upstream service unavailable; Session 'old' not found.\\n");
+  await new Promise((resolve) => { process.stdout.write("", resolve); });
+  process.exit(deadlineScenario.exitCode ?? 0);
+}
 if (prompt.includes("ABRUPT_THINKING")) {
   console.log(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "last thought before the process stops" } }));
   process.exit(0);
@@ -463,6 +591,35 @@ assert.equal(resumed.exitCode, 0, resumed.errorMessage ?? "resumed execution fai
 assert.equal(resumed.sessionId, fresh.sessionId);
 assert.match(resumed.summary ?? "", /RESUME_OK/);
 assert.equal(resumed.usageBasis, "per_run");
+
+for (const [index, [name, scenario]] of Object.entries(deadlineCases).entries()) {
+  const result = await run(
+    `00000000-0000-4000-8000-${(100 + index).toString().padStart(12, "0")}`,
+    { sessionId: fresh.sessionId, sessionParams: fresh.sessionParams, sessionDisplayId: fresh.sessionDisplayId, taskKey: null },
+    name,
+  );
+  assert.equal(result.exitCode, scenario.deadline ? scenario.exitCode ?? 1 : 0, name);
+  assert.equal(result.timedOut, false, "an inner deadline is not the outer watchdog");
+  assert.equal(result.errorCode, scenario.deadline ? "omp_deadline_exceeded" : undefined, name);
+  assert.equal(result.errorFamily, undefined, "deadline must not claim an upstream/model failure");
+  assert.equal(result.retryNotBefore, undefined, name);
+  assert.deepEqual(result.resultJson.ompTermination, scenario.deadline ? deadlineTermination : undefined, name);
+  assert.equal(result.resultJson.staleSessionAttempt, undefined, "a deadline must not trigger text-based session replay");
+  assert.equal(result.executionRecovery, undefined, "deadline does not assert interruption/session preservation");
+  assert.deepEqual(result.usage, { inputTokens: 17, outputTokens: 7, cachedInputTokens: 3 }, name);
+  assert.equal(result.costUsd, 0.005, name);
+  assert.equal(result.resultJson.toolCalls.length, 1, name);
+  assert.deepEqual(result.resultJson.toolCalls[0].result, toolTimeoutResult, name);
+  assert.equal(result.resultJson.toolCalls[0].isError, true, name);
+  if (scenario.deadline) {
+    assert.equal(result.errorMessage, "OMP agent deadline exceeded.", name);
+    assert.equal(result.summary, null, "deadline must not reuse a stale success summary");
+    assert.deepEqual(result.resultJson.errors, ["OMP agent deadline exceeded."], name);
+  } else {
+    assert.equal(result.errorMessage, null, name);
+    if (name.endsWith("SUCCESS")) assert.match(result.summary, /Later work really succeeded|only quoted tool output/, name);
+  }
+}
 
 const ephemeralRunId = "00000000-0000-4000-8000-000000000013";
 const ephemeral = await run(ephemeralRunId, emptyRuntime, "EPHEMERAL_OK", {

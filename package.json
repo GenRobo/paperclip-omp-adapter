@@ -1,6 +1,6 @@
 {
   "name": "@genrobo/paperclip-omp-adapter",
-  "version": "0.11.2",
+  "version": "0.11.3",
   "description": "External Paperclip adapter for the Oh My Pi coding-agent CLI",
   "type": "module",
   "license": "MIT",

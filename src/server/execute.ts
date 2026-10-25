@@ -856,6 +856,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       priorAttempt?: ProcessAttempt,
     ): AdapterExecutionResult => {
       const parsedError = attempt.parsed.errors.find((error) => error.trim()) ?? "";
+      const termination = attempt.parsed.termination;
       const stderrLine = firstNonEmptyLine(attempt.proc.stderr);
       const processExitCode = attempt.proc.exitCode ?? (attempt.proc.signal ? 1 : 0);
       const effectiveExitCode = processExitCode === 0 && parsedError ? 1 : processExitCode;
@@ -875,15 +876,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const model = attempt.parsed.model ?? (asString(executionConfig.model, "").trim() || null);
       const fallbackError = parsedError || stderrLine || `OMP exited with code ${effectiveExitCode}.`;
       const failed = effectiveExitCode !== 0 || attempt.proc.timedOut;
-      const classification = failed
-        ? classifyOmpFailure({
-            parsedError,
-            stderr: attempt.proc.stderr,
-            timedOut: attempt.proc.timedOut,
-            exitCode: effectiveExitCode,
-            signal: attempt.proc.signal,
-          })
-        : { errorCode: null, errorFamily: null, retryNotBefore: null };
+      const classification = termination
+        ? { errorCode: "omp_deadline_exceeded", errorFamily: null, retryNotBefore: null }
+        : failed
+          ? classifyOmpFailure({
+              parsedError,
+              stderr: attempt.proc.stderr,
+              timedOut: attempt.proc.timedOut,
+              exitCode: effectiveExitCode,
+              signal: attempt.proc.signal,
+            })
+          : { errorCode: null, errorFamily: null, retryNotBefore: null };
       const cancelled = ctx.signal?.aborted === true && (failed || attempt.proc.signal !== null);
       const executionRecovery = cancelled && resolvedSessionId && attempt.pendingToolCount === 0
         ? { kind: "interrupted", providerStopped: true, sessionPreserved: true, actionOutcomes: "settled" } as const
@@ -914,7 +917,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         billingType: "unknown",
         costUsd: attempt.parsed.costUsd,
         ...(attempt.parsed.costUsd > 0 ? { cacheAdjustedCostUsd: attempt.parsed.costUsd } : {}),
-        summary: attempt.parsed.finalMessage ?? attempt.parsed.messages.at(-1) ?? null,
+        summary: parsedError ? null : attempt.parsed.finalMessage ?? attempt.parsed.messages.at(-1) ?? null,
         clearSession: retriedFresh && !resolvedSessionId,
         resultJson: {
           ...(executionRecovery?.kind === "interrupted"
@@ -923,6 +926,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           stdout: attempt.proc.stdout,
           stderr: attempt.proc.stderr,
           errors: attempt.parsed.errors,
+          ...(termination ? { ompTermination: termination } : {}),
           toolCalls: attempt.parsed.toolCalls,
           unknownLines: attempt.parsed.unknownLines,
           ...(attempt.reporterFailed ? { progressReporterFailed: true } : {}),
@@ -947,6 +951,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (
       canResume &&
       initialFailed &&
+      !initial.parsed.termination &&
       isOmpUnknownSessionError(initial.proc.stdout, initial.proc.stderr)
     ) {
       await onLog(

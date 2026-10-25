@@ -8,11 +8,17 @@ export interface ParsedOmpToolCall {
   isError: boolean;
 }
 
+export interface OmpTermination {
+  reason: "deadline";
+  deadlineAt: number;
+}
+
 export interface ParsedOmpOutput {
   sessionId: string | null;
   messages: string[];
   finalMessage: string | null;
   errors: string[];
+  termination: OmpTermination | null;
   provider: string | null;
   model: string | null;
   usage: {
@@ -127,6 +133,7 @@ export function createOmpOutputAccumulator(): OmpOutputAccumulator {
   let unknownDropped = 0;
   let unknownDroppedBytes = 0;
   let terminalError: string | null = null;
+  let termination: OmpTermination | null = null;
   let sessionId: string | null = null;
   let provider: string | null = null;
   let model: string | null = null;
@@ -224,6 +231,14 @@ export function createOmpOutputAccumulator(): OmpOutputAccumulator {
         break;
       }
       case "agent_end": {
+        // Continuation frames are not the outcome of the invocation.
+        if (event.isTerminal === false || event.willContinue === true) break;
+        const cause = object(event.termination);
+        termination = cause?.reason === "deadline"
+          && typeof cause.deadlineAt === "number"
+          && Number.isFinite(cause.deadlineAt)
+          ? { reason: "deadline", deadlineAt: cause.deadlineAt }
+          : null;
         if (Array.isArray(event.messages)) {
           for (let index = event.messages.length - 1; index >= 0; index -= 1) {
             if (readAssistant(event.messages[index], false)) break;
@@ -325,8 +340,9 @@ export function createOmpOutputAccumulator(): OmpOutputAccumulator {
     return {
       sessionId,
       messages: [...messageTexts.values()],
-      finalMessage,
-      errors: terminalError ? [terminalError] : [],
+      finalMessage: termination || terminalError ? null : finalMessage,
+      errors: termination ? ["OMP agent deadline exceeded."] : terminalError ? [terminalError] : [],
+      termination,
       provider,
       model,
       usage: {
